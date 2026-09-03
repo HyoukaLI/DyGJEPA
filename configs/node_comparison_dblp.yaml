@@ -1,0 +1,223 @@
+seed: 42
+device: auto
+output_path: results/node_comparison_dblp.json
+
+data:
+  path: data/processed/dblp.npz
+
+common_model:
+  hidden_dim: 128
+  rwpe_dim: 8
+  rwpe_walks: 16
+  time_dim: 32
+  gnn_layers: 2
+  window_size: 3
+  predictor_hidden_dim: 256
+  rwpe_seed: 42
+  cache_rwpe: true
+
+sg_jepa:
+  threshold: 0.05
+  reset_potential: 0.0
+  temperature: 0.2
+
+rcps_jepa:
+  event_dim: 8
+  signature_depth: 2
+  subgraph_budget: 32
+  ema_momentum: 0.995
+  node_loss_weight: 1.0
+  node_contrastive_loss_weight: 1.0
+  contrastive_temperature: 0.2
+  link_loss_weight: 0.0
+  relation_loss_weight: 0.0
+  variance_loss_weight: 0.02
+  covariance_loss_weight: 0.001
+  variance_target: 0.5
+
+# Node baselines.  EvolveGCN-H and ROLAND use node labels.  Every other method
+# is self-supervised and is evaluated with the exact same frozen MLP probe as
+# SG-JEPA/RCPS-JEPA.  Continuous-time models share the documented DTDG event
+# adapter; snapshot SSL methods consume the original 27 snapshots directly.
+node_baselines:
+  enabled: [evolvegcn_h, roland, tgn, tgat, cawn, tcl, graphmixer, dygformer, cldg, maskdgnn, dvgmae]
+  evolvegcn_h:
+    hidden_dim: 128
+    layers: 2
+    epochs: 100
+    learning_rate: 0.01
+    weight_decay: 0.0
+    grad_clip: 1.0
+    eval_every: 5
+  roland:
+    hidden_dim: 128
+    layers: 2
+    dropout: 0.0
+    bptt_steps: 4
+    epochs: 100
+    learning_rate: 0.03
+    weight_decay: 0.0
+    grad_clip: 1.0
+    eval_every: 5
+  tgn:
+    time_dim: 100
+    layers: 1
+    heads: 2
+    num_neighbors: 10
+    dropout: 0.1
+    batch_size: 200
+    inference_batch_size: 512
+    epochs: 50
+    learning_rate: 0.0001
+    weight_decay: 0.0
+    grad_clip: 1.0
+    eval_every: 5
+  tgat:
+    hidden_dim: 100
+    layers: 2
+    heads: 2
+    num_neighbors: 20
+    dropout: 0.1
+    uniform_neighbors: false
+    batch_size: 200
+    inference_batch_size: 256
+    epochs: 50
+    learning_rate: 0.0001
+    weight_decay: 0.0
+    grad_clip: 1.0
+    eval_every: 5
+  # Author-maintained DyGLib backbones and architecture defaults.  DBLP has no
+  # exact event timestamps, so these use the same tied-snapshot-time adapter as
+  # TGN/TGAT and one-negative native future-link pretraining.
+  cawn:
+    time_dim: 100
+    position_feat_dim: 128
+    walk_length: 1
+    num_walk_heads: 8
+    num_neighbors: 32
+    dropout: 0.1
+    sample_neighbor_strategy: time_interval_aware
+    time_scaling_factor: 0.000001
+    batch_size: 200
+    inference_batch_size: 128
+    epochs: 50
+    learning_rate: 0.0001
+    weight_decay: 0.0
+    grad_clip: 1.0
+    eval_every: 5
+  tcl:
+    time_dim: 100
+    layers: 2
+    heads: 2
+    num_neighbors: 20
+    dropout: 0.1
+    batch_size: 200
+    inference_batch_size: 256
+    epochs: 50
+    learning_rate: 0.0001
+    weight_decay: 0.0
+    grad_clip: 1.0
+    eval_every: 5
+  graphmixer:
+    time_dim: 100
+    layers: 2
+    heads: 2
+    num_neighbors: 30
+    time_gap: 2000
+    dropout: 0.5
+    batch_size: 200
+    inference_batch_size: 256
+    epochs: 50
+    learning_rate: 0.0001
+    weight_decay: 0.0
+    grad_clip: 1.0
+    eval_every: 5
+  dygformer:
+    time_dim: 100
+    channel_embedding_dim: 50
+    patch_size: 1
+    layers: 2
+    heads: 2
+    dropout: 0.1
+    max_input_sequence_length: 32
+    batch_size: 200
+    inference_batch_size: 128
+    epochs: 50
+    learning_rate: 0.0001
+    weight_decay: 0.0
+    grad_clip: 1.0
+    eval_every: 5
+  # Discrete-time self-supervised baselines.  Their representation learners
+  # retain the paper/repository mechanisms; only the final node probe is shared.
+  cldg:
+    hidden_dim: 128
+    embedding_dim: 128
+    layers: 2
+    dropout: 0.0
+    num_spans: 4
+    num_views: 4
+    view_strategy: sequential
+    temperature: 0.07
+    contrastive_batch_size: 1024
+    probe_hidden_dim: 128
+    epochs: 100
+    learning_rate: 0.004
+    weight_decay: 0.0005
+    grad_clip: 1.0
+    eval_every: 5
+  maskdgnn:
+    hidden_dim: 64
+    layers: 2
+    dropout: 0.1
+    window_size: 4
+    mask_ratio: 0.3
+    dynamics_ratio: 0.7
+    dynamics_weight: 1.0
+    existing_offset: 2.0
+    new_node_offset: -0.5
+    pagerank_damping: 0.85
+    pagerank_steps: 10
+    pretrain_pair_limit: 4096
+    probe_hidden_dim: 128
+    epochs: 100
+    learning_rate: 0.008
+    weight_decay: 0.0
+    grad_clip: 1.0
+    eval_every: 5
+  dvgmae:
+    hidden_dim: 64
+    layers: 2
+    dropout: 0.1
+    window_size: 4
+    mask_ratio: 0.3
+    history_balance: 0.5
+    kl_weight: 0.001
+    feature_weight: 0.1
+    pretrain_pair_limit: 4096
+    probe_hidden_dim: 128
+    epochs: 100
+    learning_rate: 0.001
+    weight_decay: 0.00001
+    grad_clip: 1.0
+    eval_every: 5
+
+probe:
+  train_ratio: 0.4
+  validation_ratio_within_train: 0.1
+
+training:
+  epochs: 120
+  node_batch_size: 1024
+  learning_rate: 0.001
+  weight_decay: 0.00001
+  grad_clip: 1.0
+  eval_every: 5
+  dense_eval_epochs: 10
+  selection_probe_epochs: 100
+  probe_epochs: 500
+  probe_hidden_dim: 512
+  # Fixed before test evaluation: local relation context + long-range diffusion.
+  rcps_multiscale_views: [hop2, hop8]
+  # Use only the learned dynamic view for RCPS checkpoint selection.
+  rcps_checkpoint_views: [fused]
+  min_checkpoint_epoch: 25

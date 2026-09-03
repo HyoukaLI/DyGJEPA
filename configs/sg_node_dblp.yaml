@@ -1,0 +1,35 @@
+seed: 42
+device: auto
+
+data:
+  path: data/processed/dblp.npz
+
+model:
+  hidden_dim: 128
+  rwpe_dim: 8
+  rwpe_walks: 16
+  time_dim: 32
+  gnn_layers: 2
+  window_size: 3
+  threshold: 0.05
+  reset_potential: 0.0
+  temperature: 0.2
+  predictor_hidden_dim: 256
+  rwpe_seed: 42
+  cache_rwpe: true
+
+training:
+  epochs: 120
+  batch_size: 1024
+  learning_rate: 0.001
+  weight_decay: 0.00001
+  grad_clip: 1.0
+  eval_every: 5
+  probe_epochs: 500
+  probe_hidden_dim: 128
+  train_ratio: 0.6
+  validation_ratio_within_train: 0.1
+  checkpoint_every: 10
+  selection_probe_epochs: 100
+  selection_metric: macro_f1
+  checkpoint_path: checkpoints/dblp_best_e120_b1024_rw16.pt

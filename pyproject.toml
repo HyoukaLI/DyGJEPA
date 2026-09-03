@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sg-rcps-jepa-comparison"
+version = "0.1.0"
+description = "Matched dynamic-graph comparison of RCPS-JEPA and temporal link-prediction baselines"
+requires-python = ">=3.10"
+dependencies = [
+  "numpy>=1.24",
+  "torch>=2.1",
+  "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7.4"]
+features = [
+  "gensim>=4.3",
+  "numba>=0.59",
+  "scipy>=1.11",
+  "tqdm>=4.66",
+]
+
+[project.scripts]
+sg-node-train = "jepa_compare.train_sg_jepa:main"
+jepa-node-compare = "jepa_compare.compare_node_prediction:main"
+jepa-link-compare = "jepa_compare.compare_link_prediction:main"
+
+[tool.setuptools.packages.find]
+include = ["jepa_compare*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]

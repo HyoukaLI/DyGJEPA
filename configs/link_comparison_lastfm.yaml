@@ -1,0 +1,306 @@
+seed: 42
+device: auto
+output_path: results/link_comparison_lastfm.json
+
+data:
+  path: data/processed/lastfm.npz
+
+# Current shared future-interaction protocol: chronological 75/15/10.
+split:
+  train_ratio: 0.75
+  validation_ratio: 0.15
+
+common_model:
+  hidden_dim: 128
+  rwpe_dim: 4
+  rwpe_walks: 8
+  time_dim: 32
+  gnn_layers: 2
+  window_size: 4
+  predictor_hidden_dim: 256
+  rwpe_seed: 42
+  cache_rwpe: true
+
+jodie:
+  # Original Wikipedia interaction vectors, auxiliary user-state objective,
+  # and the paper's 500 time spans.
+  interaction_feature_dim: 2
+  tbatch_count: 500
+  state_change: false
+
+# DyRep paper mechanism adapted to Wikipedia's single communication-event
+# stream.  The original paper has two event types; Wikipedia has no separate
+# association process, so one point-process intensity is used here.
+dyrep:
+  hidden_dim: 32
+  neighbor_count: 20
+  survival_samples: 5
+  train_batch_size: 200
+  survival_weight: 1.0
+
+# Official TGAT Wikipedia architecture and sampling defaults.
+tgat:
+  interaction_feature_dim: 2
+  num_layers: 2
+  num_heads: 2
+  num_neighbors: 20
+  dropout: 0.1
+  uniform_neighbors: false
+  train_batch_size: 200
+  eval_group_batch_size: 16
+
+# Author-maintained DyGLib backbones.  Dataset-specific settings below are the
+# repository's Wikipedia best/default configurations; only our outer split and
+# evaluation candidate set are shared across methods.
+additional_baselines:
+  enabled: [edgebank, tgn, cawn, tcl, graphmixer, dygformer]
+
+# Discrete-time self-supervised representation baselines.  All three see only
+# the chronological training snapshots during SSL pretraining; their encoders
+# are then frozen and evaluated with the same PairMLP link probe and the common
+# 1-positive/20-negative candidate groups.
+snapshot_ssl_baselines:
+  enabled: [cldg, maskdgnn, dvgmae]
+
+# CLDG official-code mechanisms and defaults (GCN, four timespan views,
+# symmetric InfoNCE at temperature 0.07).  Wikipedia was not an original CLDG
+# dataset, so the 50 event bins are treated as discrete timespans.
+cldg:
+  hidden_dim: 128
+  embedding_dim: 128
+  num_layers: 2
+  dropout: 0.0
+  num_spans: 4
+  num_views: 4
+  view_strategy: sequential
+  temperature: 0.07
+  contrastive_batch_size: 1024
+  probe_hidden_dim: 128
+
+# MaskDGNN IJCAI'25 settings: activeness-aware temporal edge masking,
+# two-layer normalized GCN and adaptive FFT filtering over four snapshots.
+maskdgnn:
+  hidden_dim: 64
+  num_layers: 2
+  dropout: 0.1
+  window_size: 4
+  mask_ratio: 0.3
+  dynamics_ratio: 0.7
+  dynamics_weight: 1.0
+  existing_offset: 2.0
+  new_node_offset: -0.5
+  pagerank_damping: 0.85
+  pagerank_steps: 10
+  pretrain_pair_limit: 4096
+  probe_hidden_dim: 128
+
+# DVGMAE paper-level implementation.  It combines history-balanced temporal
+# edge masking, a variational GCN encoder and a temporal/global decoder.
+dvgmae:
+  hidden_dim: 64
+  num_layers: 2
+  dropout: 0.1
+  window_size: 4
+  mask_ratio: 0.3
+  history_balance: 0.5
+  kl_weight: 0.001
+  feature_weight: 0.1
+  pretrain_pair_limit: 4096
+  probe_hidden_dim: 128
+
+# TGN: recent temporal neighbors and one graph-attention layer on Wikipedia.
+tgn:
+  interaction_feature_dim: 172
+  time_feat_dim: 100
+  num_layers: 1
+  num_heads: 2
+  num_neighbors: 10
+  dropout: 0.3
+  sample_neighbor_strategy: recent
+  train_batch_size: 200
+  eval_pair_batch_size: 200
+
+# CAWN: ICLR'21 causal anonymous walks, using DyGLib's Wikipedia setting.
+cawn:
+  interaction_feature_dim: 172
+  time_feat_dim: 100
+  position_feat_dim: 172
+  walk_length: 1
+  num_walk_heads: 8
+  num_neighbors: 128
+  dropout: 0.1
+  sample_neighbor_strategy: time_interval_aware
+  time_scaling_factor: 0.000001
+  train_batch_size: 200
+  eval_pair_batch_size: 200
+
+# TCL: two-layer temporal collaborative Transformer.
+tcl:
+  interaction_feature_dim: 172
+  time_feat_dim: 100
+  num_layers: 2
+  num_heads: 2
+  num_neighbors: 20
+  dropout: 0.1
+  sample_neighbor_strategy: recent
+  train_batch_size: 200
+  eval_pair_batch_size: 200
+
+# GraphMixer: ICLR'23 Wikipedia best configuration.
+graphmixer:
+  interaction_feature_dim: 172
+  time_feat_dim: 100
+  num_layers: 2
+  num_neighbors: 10
+  time_gap: 2000
+  dropout: 0.0
+  sample_neighbor_strategy: recent
+  train_batch_size: 200
+  eval_pair_batch_size: 200
+
+# DyGFormer: author implementation with Wikipedia sequence length 32.
+dygformer:
+  interaction_feature_dim: 172
+  time_feat_dim: 100
+  channel_embedding_dim: 50
+  patch_size: 16
+  num_layers: 2
+  num_heads: 2
+  dropout: 0.1
+  max_input_sequence_length: 512
+  sample_neighbor_strategy: recent
+  train_batch_size: 200
+  eval_pair_batch_size: 200
+
+rcps_jepa:
+  event_dim: 16
+  signature_depth: 2
+  subgraph_budget: 32
+  path_decay: 0.8
+  bridge_weight: 1.0
+  ema_momentum: 0.995
+  # Duplicate-preserving, full-prefix pair memory.  Each row uses only events
+  # from snapshots strictly earlier than the prediction snapshot.
+  use_causal_history: true
+  # Compress the past 172-D event vectors and retain pair/source/page semantic
+  # profiles for both repeated and previously unseen candidate links.
+  history_semantic_dim: 16
+  # Transductive collaborative-filtering residual in the supervised link head.
+  # It does not enter the JEPA target branch.
+  id_embedding_dim: 32
+  # Preserve an effective 0.995 epoch decay while updating the teacher after
+  # each online optimizer step (group-preserving batches produce 4620 steps).
+  ema_steps_per_epoch: 4620
+  shuffle_windows: true
+  # Use every target-window positive while training; evaluation still follows
+  # link.max_positive_pairs so the candidate protocol stays comparable.
+  train_max_positive_pairs: null
+  node_loss_weight: 0.05
+  relation_loss_weight: 0.05
+  link_loss_weight: 0.5
+  # Directly optimize the one-positive/twenty-negative candidate ordering.
+  rank_loss_weight: 1.5
+  variance_loss_weight: 0.02
+  covariance_loss_weight: 0.001
+  variance_target: 0.5
+
+link:
+  # One true page and twenty corrupted pages per ranking group.
+  negative_ratio: 20.0
+  max_positive_pairs: 1024
+  new_edges_only: false
+  undirected: false
+
+# Shared evaluation/checkpoint cadence only. Optimizer settings are intentionally
+# model-specific; they are not part of the common comparison protocol.
+training:
+  eval_every: 5
+
+# JODIE author-code defaults for interaction prediction.
+jodie_training:
+  epochs: 50
+  learning_rate: 0.001
+  weight_decay: 0.00001
+  grad_clip: 1.0
+
+# LDG's scalable DyRep-baseline defaults (native optimizer/objective).
+dyrep_training:
+  epochs: 5
+  learning_rate: 0.0002
+  weight_decay: 0.0
+  betas: [0.5, 0.999]
+  grad_clip: 1.0
+
+# TGAT author-code defaults for Wikipedia link prediction.
+tgat_training:
+  epochs: 50
+  learning_rate: 0.0001
+  weight_decay: 0.0
+  betas: [0.9, 0.999]
+  grad_clip: 1.0
+
+# DyGLib native optimizer defaults.  The adapter intentionally ignores
+# grad_clip because the official training loop does not clip these gradients.
+tgn_training: &dyglib_training
+  epochs: 100
+  learning_rate: 0.0001
+  weight_decay: 0.0
+  betas: [0.9, 0.999]
+  grad_clip: 1.0
+
+cawn_training:
+  <<: *dyglib_training
+
+tcl_training:
+  <<: *dyglib_training
+
+graphmixer_training:
+  <<: *dyglib_training
+
+dygformer_training:
+  <<: *dyglib_training
+
+# Shared downstream budget for the three frozen-probe SSL baselines.
+snapshot_ssl_training: &snapshot_ssl_training
+  probe_epochs: 50
+  probe_learning_rate: 0.001
+  probe_weight_decay: 0.00001
+  pair_batch_size: 512
+  grad_clip: 1.0
+  eval_every: 5
+  patience: 0
+  pretrain_log_every: 10
+
+# CLDG official optimizer defaults are lr=4e-3 and weight_decay=5e-4.
+cldg_training:
+  <<: *snapshot_ssl_training
+  pretrain_epochs: 100
+  pretrain_learning_rate: 0.004
+  pretrain_weight_decay: 0.0005
+
+# MaskDGNN reports an inner learning rate of 0.008.  The unavailable official
+# repository prevents byte-for-byte reproduction, so provenance is recorded
+# as paper_reimplementation in the result JSON.
+maskdgnn_training:
+  <<: *snapshot_ssl_training
+  pretrain_epochs: 100
+  pretrain_learning_rate: 0.008
+  pretrain_weight_decay: 0.0
+
+dvgmae_training:
+  <<: *snapshot_ssl_training
+  pretrain_epochs: 100
+  pretrain_learning_rate: 0.001
+  pretrain_weight_decay: 0.00001
+
+rcps_training:
+  epochs: 40
+  pair_batch_size: 512
+  learning_rate: 0.00001
+  weight_decay: 0.0001
+  grad_clip: 1.0
+  eval_every: 1
+  patience: 8
+  # The causal recurrence prior is a valid parameter-free predictor; retain it
+  # as epoch 0 if learned residuals do not improve validation AP.
+  evaluate_before_training: true

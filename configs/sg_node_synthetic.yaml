@@ -1,0 +1,28 @@
+seed: 42
+device: auto
+data:
+  path: null
+  num_nodes: 256
+  num_snapshots: 12
+  feature_dim: 32
+  num_classes: 4
+  edge_probability: 0.025
+model:
+  hidden_dim: 64
+  rwpe_dim: 8
+  rwpe_walks: 16
+  time_dim: 16
+  gnn_layers: 2
+  window_size: 4
+  threshold: 0.05
+  reset_potential: 0.0
+  temperature: 0.2
+  predictor_hidden_dim: 128
+training:
+  epochs: 20
+  learning_rate: 0.001
+  weight_decay: 0.00001
+  grad_clip: 1.0
+  eval_every: 5
+  probe_epochs: 100
+  train_ratio: 0.6

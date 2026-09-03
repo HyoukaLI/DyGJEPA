@@ -1,0 +1,107 @@
+seed: 42
+device: auto
+output_path: results/node_comparison_synthetic.json
+
+data:
+  path: null
+  num_nodes: 96
+  num_snapshots: 12
+  feature_dim: 16
+  num_classes: 4
+  edge_probability: 0.04
+
+common_model:
+  hidden_dim: 32
+  rwpe_dim: 4
+  rwpe_walks: 8
+  time_dim: 8
+  gnn_layers: 2
+  window_size: 4
+  predictor_hidden_dim: 64
+  rwpe_seed: 42
+  cache_rwpe: true
+
+sg_jepa:
+  threshold: 0.05
+  reset_potential: 0.0
+  temperature: 0.2
+
+rcps_jepa:
+  event_dim: 6
+  signature_depth: 2
+  subgraph_budget: 16
+  ema_momentum: 0.99
+  node_loss_weight: 0.5
+  node_contrastive_loss_weight: 1.0
+  contrastive_temperature: 0.2
+  link_loss_weight: 0.0
+  relation_loss_weight: 0.0
+  variance_loss_weight: 0.02
+  covariance_loss_weight: 0.001
+  variance_target: 0.5
+
+node_baselines:
+  enabled: [evolvegcn_h, roland, tgn, tgat]
+  evolvegcn_h:
+    hidden_dim: 32
+    layers: 2
+    epochs: 10
+    learning_rate: 0.01
+    weight_decay: 0.0
+    grad_clip: 1.0
+    eval_every: 1
+  roland:
+    hidden_dim: 32
+    layers: 2
+    dropout: 0.0
+    bptt_steps: 4
+    epochs: 10
+    learning_rate: 0.01
+    weight_decay: 0.0
+    grad_clip: 1.0
+    eval_every: 1
+  tgn:
+    time_dim: 16
+    layers: 1
+    heads: 2
+    num_neighbors: 5
+    dropout: 0.1
+    batch_size: 128
+    inference_batch_size: 128
+    epochs: 10
+    learning_rate: 0.0001
+    weight_decay: 0.0
+    grad_clip: 1.0
+    eval_every: 1
+  tgat:
+    hidden_dim: 16
+    layers: 2
+    heads: 2
+    num_neighbors: 5
+    dropout: 0.1
+    uniform_neighbors: false
+    batch_size: 128
+    inference_batch_size: 128
+    epochs: 10
+    learning_rate: 0.0001
+    weight_decay: 0.0
+    grad_clip: 1.0
+    eval_every: 1
+
+probe:
+  train_ratio: 0.6
+  validation_ratio_within_train: 0.1
+
+training:
+  epochs: 10
+  node_batch_size: 128
+  learning_rate: 0.001
+  weight_decay: 0.0001
+  grad_clip: 1.0
+  eval_every: 1
+  dense_eval_epochs: 10
+  selection_probe_epochs: 50
+  probe_epochs: 100
+  probe_hidden_dim: 32
+  rcps_multiscale_views: [hop2, hop8]
+  rcps_checkpoint_views: [fused]
