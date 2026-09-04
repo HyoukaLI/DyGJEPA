@@ -541,6 +541,26 @@ def test_dyglib_adapter_zero_pads_low_dimensional_event_features() -> None:
     assert (model._train_stream.features[:, 2:] == 0.0).all()
 
 
+def test_dyglib_backbone_created_after_to_follows_adapter_device() -> None:
+    snapshots = unique_snapshots(bipartite_windows())
+    model = DyGLibLinkBaseline(
+        model_name="dyrep",
+        feature_dim=6,
+        num_nodes=7,
+        bipartite_source_count=3,
+        interaction_feature_dim=4,
+        time_feat_dim=2,
+        num_layers=1,
+        num_heads=1,
+        num_neighbors=2,
+    ).to("meta")
+
+    model.prepare_streams(snapshots, snapshots[:1])
+
+    assert model.backbone is not None
+    assert all(parameter.device.type == "meta" for parameter in model.parameters())
+
+
 def test_event_baselines_accept_homogeneous_destination_corruption() -> None:
     windows = homogeneous_windows()
     snapshots = unique_snapshots(windows)

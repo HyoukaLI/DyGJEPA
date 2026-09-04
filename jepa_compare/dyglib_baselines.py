@@ -314,6 +314,12 @@ class DyGLibLinkBaseline(nn.Module, SharedLinkProtocol):
                 num_heads=self.num_heads,
                 max_input_sequence_length=self.max_input_sequence_length,
             )
+        # The adapter is moved to the requested device before prepare_streams
+        # constructs the upstream backbone. Newly attached child modules do not
+        # inherit an existing module's device automatically, so move all
+        # parameters created by the upstream constructor explicitly. Raw node
+        # and edge feature tensors already use ``device`` from ``common``.
+        self.backbone = self.backbone.to(self._device_anchor.device)
         self.link_predictor = MergeLayer(
             input_dim1=self.dimension,
             input_dim2=self.dimension,
