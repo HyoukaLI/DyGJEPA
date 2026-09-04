@@ -13,7 +13,6 @@ import yaml
 
 from .data import load_npz, make_synthetic
 from .dyglib_baselines import DyGLibLinkBaseline, EdgeBankLinkBaseline
-from .dyrep_baseline import DyRepLinkBaseline
 from .jodie_baseline import JODIELinkBaseline
 from .link_prediction import TemporalWindowSplit, temporal_window_split
 from .rcps_jepa import RCPSJEPA
@@ -52,7 +51,7 @@ def _train_one(
     native_jodie = isinstance(model, JODIELinkBaseline)
     native_event_model = isinstance(
         model,
-        (JODIELinkBaseline, DyRepLinkBaseline, TGATLinkBaseline, DyGLibLinkBaseline),
+        (JODIELinkBaseline, TGATLinkBaseline, DyGLibLinkBaseline),
     )
     betas = tuple(float(value) for value in training.get("betas", (0.9, 0.999)))
     optimizer = (
@@ -351,12 +350,6 @@ def run(config: dict) -> dict[str, dict[str, dict[str, float]]]:
         **dict(config.get("jodie", {})),
         **link_cfg,
     }
-    dyrep_args = {
-        "num_nodes": graph.num_nodes,
-        "bipartite_source_count": graph.num_source_nodes,
-        **dict(config.get("dyrep", {})),
-        **link_cfg,
-    }
     tgat_args = {
         "num_nodes": graph.num_nodes,
         "bipartite_source_count": graph.num_source_nodes,
@@ -365,7 +358,6 @@ def run(config: dict) -> dict[str, dict[str, dict[str, float]]]:
     }
     shared_training = dict(config.get("training", {}))
     jodie_training = {**shared_training, **dict(config.get("jodie_training", {}))}
-    dyrep_training = {**shared_training, **dict(config.get("dyrep_training", {}))}
     tgat_training = {**shared_training, **dict(config.get("tgat_training", {}))}
     rcps_training = {**shared_training, **dict(config.get("rcps_training", {}))}
     result: dict[str, dict[str, dict[str, float]]] = {}
@@ -389,19 +381,6 @@ def run(config: dict) -> dict[str, dict[str, dict[str, float]]]:
         del jodie_model
         release_device_memory(device)
 
-    if should_run("dyrep"):
-        torch.manual_seed(seed)
-        dyrep_model = DyRepLinkBaseline(
-            feature_dim=graph.feature_dim, **dyrep_args
-        ).to(device)
-        dyrep_model.prepare_streams(graph.snapshots, train_snapshots)
-        dyrep_validation, dyrep_test = _train_one(
-            "dyrep", dyrep_model, split, dyrep_training, seed
-        )
-        result["dyrep"] = {"validation": dyrep_validation, "test": dyrep_test}
-        del dyrep_model
-        release_device_memory(device)
-
     if should_run("tgat"):
         torch.manual_seed(seed)
         tgat_model = TGATLinkBaseline(
@@ -420,11 +399,11 @@ def run(config: dict) -> dict[str, dict[str, dict[str, float]]]:
     # model keeps its native sampler, architecture and one-negative BCE loss.
     enabled_additional = list(
         config.get("additional_baselines", {}).get(
-            "enabled", ["edgebank", "tgn", "cawn", "tcl", "graphmixer", "dygformer"]
+            "enabled", ["edgebank", "dyrep", "tgn", "cawn", "tcl", "graphmixer", "dygformer"]
         )
     )
     supported_additional = {
-        "edgebank", "tgn", "cawn", "tcl", "graphmixer", "dygformer"
+        "edgebank", "dyrep", "tgn", "cawn", "tcl", "graphmixer", "dygformer"
     }
     unknown = set(enabled_additional) - supported_additional
     if unknown:
@@ -453,7 +432,7 @@ def run(config: dict) -> dict[str, dict[str, dict[str, float]]]:
         del edge_bank
         release_device_memory(device)
 
-    for baseline_name in ["tgn", "cawn", "tcl", "graphmixer", "dygformer"]:
+    for baseline_name in ["dyrep", "tgn", "cawn", "tcl", "graphmixer", "dygformer"]:
         if baseline_name not in enabled_additional:
             continue
         torch.manual_seed(seed)
@@ -620,11 +599,10 @@ def _dataset_configs(config: dict) -> list[tuple[str, dict]]:
     output_dir = Path(base.pop("output_dir", "results"))
     expanded: list[tuple[str, dict]] = []
     seen: set[str] = set()
-    # JODIE consumes the original event width. TGAT and the other DyGLib-style
-    # backbones retain the repository's shared 172-D width and zero-pad lower
-    # dimensional event features in their adapters. DyRep ignores covariates,
-    # but receives the raw width for validation/provenance consistency.
-    feature_consumers = ("jodie", "dyrep")
+    # JODIE consumes the original event width. TGAT and all DyGLib backbones,
+    # including DyRep, retain the repository's shared 172-D width and zero-pad
+    # lower-dimensional event features in their adapters.
+    feature_consumers = ("jodie",)
     for raw_entry in entries:
         if not isinstance(raw_entry, dict):
             raise ValueError("each datasets entry must be a mapping")

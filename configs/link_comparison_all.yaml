@@ -16,6 +16,8 @@ datasets:
     interaction_feature_dim: 4
     state_change: true
     overrides:
+      dyrep:
+        dropout: 0.0
       tgat:
         uniform_neighbors: false
       tgn:
@@ -33,6 +35,8 @@ datasets:
     interaction_feature_dim: 2
     state_change: false
     overrides:
+      dyrep:
+        dropout: 0.0
       tgat:
         uniform_neighbors: false
       tgn:
@@ -56,6 +60,7 @@ datasets:
       [dyrep, tgat, edgebank, tgn, cawn, tcl, graphmixer, dygformer,
        cldg, maskdgnn, dvgmae, rcps_jepa]
     overrides:
+      dyrep: {dropout: 0.0, sample_neighbor_strategy: uniform}
       tgat: {dropout: 0.2, uniform_neighbors: true}
       tgn: {dropout: 0.3, sample_neighbor_strategy: uniform}
       cawn: {num_neighbors: 128, dropout: 0.0}
@@ -68,6 +73,7 @@ datasets:
     state_change: false
     models: *homogeneous_models
     overrides:
+      dyrep: {dropout: 0.0, sample_neighbor_strategy: recent}
       tgat: {dropout: 0.1, uniform_neighbors: false}
       tgn: {dropout: 0.1, sample_neighbor_strategy: recent}
       cawn: {num_neighbors: 64, dropout: 0.1}
@@ -80,6 +86,7 @@ datasets:
     state_change: false
     models: *homogeneous_models
     overrides:
+      dyrep: {dropout: 0.1, sample_neighbor_strategy: recent}
       tgat: {dropout: 0.1, uniform_neighbors: false}
       tgn: {dropout: 0.1, sample_neighbor_strategy: recent}
       cawn: {num_neighbors: 64, dropout: 0.1}
@@ -92,6 +99,7 @@ datasets:
     state_change: false
     models: *homogeneous_models
     overrides:
+      dyrep: {dropout: 0.1, sample_neighbor_strategy: recent}
       tgat: {dropout: 0.1, uniform_neighbors: true}
       tgn: {dropout: 0.2, sample_neighbor_strategy: recent}
       cawn: {num_neighbors: 64, dropout: 0.1}
@@ -104,6 +112,7 @@ datasets:
     state_change: false
     models: *homogeneous_models
     overrides:
+      dyrep: {dropout: 0.1, sample_neighbor_strategy: recent}
       tgat: {dropout: 0.2, uniform_neighbors: false}
       tgn: {dropout: 0.1, sample_neighbor_strategy: uniform}
       cawn: {num_neighbors: 64, dropout: 0.1}
@@ -116,6 +125,7 @@ datasets:
     state_change: false
     models: *homogeneous_models
     overrides:
+      dyrep: {dropout: 0.0, sample_neighbor_strategy: recent}
       tgat: {dropout: 0.1, uniform_neighbors: false}
       tgn: {dropout: 0.1, sample_neighbor_strategy: recent}
       cawn: {num_neighbors: 32, dropout: 0.1}
@@ -128,6 +138,7 @@ datasets:
     state_change: false
     models: *homogeneous_models
     overrides:
+      dyrep: {dropout: 0.0, sample_neighbor_strategy: recent}
       tgat: {dropout: 0.2, uniform_neighbors: false}
       tgn: {dropout: 0.0, sample_neighbor_strategy: recent}
       cawn: {num_neighbors: 32, dropout: 0.1}
@@ -140,6 +151,7 @@ datasets:
     state_change: false
     models: *homogeneous_models
     overrides:
+      dyrep: {dropout: 0.0, sample_neighbor_strategy: recent}
       tgat: {dropout: 0.1, uniform_neighbors: false}
       tgn: {dropout: 0.1, sample_neighbor_strategy: recent}
       cawn: {num_neighbors: 64, dropout: 0.1}
@@ -170,15 +182,18 @@ jodie:
   tbatch_count: 500
   state_change: true
 
-# DyRep paper mechanism adapted to each dataset's single interaction stream.
-# The original paper has two event types; these datasets have no separate
-# association process, so one point-process intensity is used here.
+# Author-maintained DyGLib DyRep configuration. The outer chronological split
+# and evaluation candidates remain shared with the other comparison methods.
 dyrep:
-  hidden_dim: 32
-  neighbor_count: 10
-  survival_samples: 5
+  interaction_feature_dim: 172
+  time_feat_dim: 100
+  num_layers: 1
+  num_heads: 2
+  num_neighbors: 10
+  dropout: 0.1
+  sample_neighbor_strategy: recent
   train_batch_size: 200
-  survival_weight: 1.0
+  eval_pair_batch_size: 200
 
 # TGAT author-mechanism adapter. Wikipedia keeps author-repository sampling;
 # MOOC and LastFM use the dataset-specific recent-neighbor setting below.
@@ -196,12 +211,12 @@ tgat:
 # dataset entries above override the settings reported for MOOC and LastFM.
 # Only the outer split and evaluation candidate set are shared across methods.
 additional_baselines:
-  enabled: [edgebank, tgn, cawn, tcl, graphmixer, dygformer]
+  enabled: [edgebank, dyrep, tgn, cawn, tcl, graphmixer, dygformer]
 
 # Discrete-time self-supervised representation baselines.  All three see only
 # the chronological training snapshots during SSL pretraining; their encoders
 # are then frozen and evaluated with the same PairMLP link probe and the common
-# 1-positive/20-negative candidate groups.
+# 1-positive/100-negative candidate groups.
 snapshot_ssl_baselines:
   enabled: [cldg, maskdgnn, dvgmae]
 
@@ -341,14 +356,14 @@ rcps_jepa:
   node_loss_weight: 0.05
   relation_loss_weight: 0.05
   link_loss_weight: 0.5
-  # Directly optimize the one-positive/twenty-negative candidate ordering.
+  # Directly optimize the one-positive/hundred-negative candidate ordering.
   rank_loss_weight: 1.5
   variance_loss_weight: 0.02
   covariance_loss_weight: 0.001
   variance_target: 0.5
 
 link:
-  # One true destination and twenty corrupted destinations per ranking group.
+  # One true destination and one hundred corrupted destinations per ranking group.
   negative_ratio: 100.0
   max_positive_pairs: 1024
   new_edges_only: false
@@ -364,14 +379,6 @@ jodie_training:
   epochs: 50
   learning_rate: 0.001
   weight_decay: 0.00001
-  grad_clip: 1.0
-
-# LDG's scalable DyRep-baseline defaults (native optimizer/objective).
-dyrep_training:
-  epochs: 5
-  learning_rate: 0.0002
-  weight_decay: 0.0
-  betas: [0.5, 0.999]
   grad_clip: 1.0
 
 # TGAT author-code optimizer defaults.
@@ -390,6 +397,9 @@ tgn_training: &dyglib_training
   weight_decay: 0.0
   betas: [0.9, 0.999]
   grad_clip: 1.0
+
+dyrep_training:
+  <<: *dyglib_training
 
 cawn_training:
   <<: *dyglib_training

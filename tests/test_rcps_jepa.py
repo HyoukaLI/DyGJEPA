@@ -2,7 +2,6 @@ import torch
 
 from jepa_compare.compare_link_prediction import _train_one
 from jepa_compare.data import Snapshot, make_synthetic
-from jepa_compare.dyrep_baseline import DyRepLinkBaseline
 from jepa_compare.dyglib_baselines import DyGLibLinkBaseline, EdgeBankLinkBaseline
 from jepa_compare.jodie_baseline import JODIELinkBaseline
 from jepa_compare.link_prediction import (
@@ -246,31 +245,6 @@ def test_jodie_link_baseline_uses_coupled_updates_and_time_projection() -> None:
     assert model.prediction_layer.out_features == 8 + 5
 
 
-def test_dyrep_keeps_point_process_and_sampled_survival_objective() -> None:
-    windows = bipartite_windows()
-    snapshots = unique_snapshots(windows)
-    model = DyRepLinkBaseline(
-        feature_dim=6,
-        num_nodes=7,
-        bipartite_source_count=3,
-        hidden_dim=8,
-        neighbor_count=2,
-        survival_samples=2,
-        train_batch_size=3,
-        negative_ratio=1.0,
-        max_positive_pairs=2,
-    )
-    model.prepare_streams(snapshots, unique_snapshots(windows[:1]))
-    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
-    metrics = model.train_epoch(windows[:1], optimizer, grad_clip=1.0, seed=5)
-    assert torch.isfinite(torch.tensor(metrics["loss"]))
-    assert metrics["survival_loss"] > 0
-    assert model.intensity_projection.weight.grad is not None
-    validation = model.evaluate_protocol(windows[1:2], windows[:1], query_seed=7)
-    assert validation["examples"] == 4
-    assert 0 <= validation["ap"] <= 1
-
-
 def test_tgat_keeps_recursive_temporal_attention_and_raw_edge_features() -> None:
     windows = bipartite_windows()
     snapshots = unique_snapshots(windows)
@@ -482,6 +456,7 @@ def test_official_dyglib_backbones_follow_shared_protocol() -> None:
     all_snapshots = unique_snapshots(windows)
     train_snapshots = unique_snapshots(split.train)
     settings = {
+        "dyrep": dict(num_layers=1, num_heads=1, num_neighbors=2),
         "tgn": dict(num_layers=1, num_heads=1, num_neighbors=2),
         "cawn": dict(
             walk_length=1,
@@ -584,14 +559,18 @@ def test_event_baselines_accept_homogeneous_destination_corruption() -> None:
             negative_ratio=1.0,
             max_positive_pairs=2,
         ),
-        DyRepLinkBaseline(
+        DyGLibLinkBaseline(
+            model_name="dyrep",
             feature_dim=6,
             num_nodes=4,
             bipartite_source_count=None,
-            hidden_dim=4,
-            neighbor_count=2,
-            survival_samples=2,
+            interaction_feature_dim=4,
+            time_feat_dim=2,
+            num_layers=1,
+            num_heads=1,
+            num_neighbors=2,
             train_batch_size=3,
+            eval_pair_batch_size=4,
             negative_ratio=1.0,
             max_positive_pairs=2,
         ),

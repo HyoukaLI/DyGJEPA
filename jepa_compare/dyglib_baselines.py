@@ -132,7 +132,7 @@ class DyGLibLinkBaseline(nn.Module, SharedLinkProtocol):
     padded event representation and supplies the common split/query/metrics.
     """
 
-    SUPPORTED = {"tgn", "cawn", "tcl", "graphmixer", "dygformer"}
+    SUPPORTED = {"dyrep", "tgn", "cawn", "tcl", "graphmixer", "dygformer"}
 
     def __init__(
         self,
@@ -209,7 +209,7 @@ class DyGLibLinkBaseline(nn.Module, SharedLinkProtocol):
 
     @property
     def is_memory_model(self) -> bool:
-        return self.model_name == "tgn"
+        return self.model_name in {"dyrep", "tgn"}
 
     def prepare_streams(
         self,
@@ -269,7 +269,7 @@ class DyGLibLinkBaseline(nn.Module, SharedLinkProtocol):
             dropout=self.dropout,
             device=device,
         )
-        if self.model_name == "tgn":
+        if self.model_name in {"dyrep", "tgn"}:
             shifts = compute_src_dst_node_time_shifts(
                 self._train_stream.sources,
                 self._train_stream.destinations,
@@ -277,7 +277,7 @@ class DyGLibLinkBaseline(nn.Module, SharedLinkProtocol):
             )
             self.backbone = MemoryModel(
                 **common,
-                model_name="TGN",
+                model_name="DyRep" if self.model_name == "dyrep" else "TGN",
                 num_layers=self.num_layers,
                 num_heads=self.num_heads,
                 src_node_mean_time_shift=shifts[0],
@@ -340,7 +340,7 @@ class DyGLibLinkBaseline(nn.Module, SharedLinkProtocol):
         positive: bool = False,
     ) -> tuple[Tensor, Tensor]:
         backbone, _ = self._require_prepared()
-        if self.model_name == "tgn":
+        if self.is_memory_model:
             return backbone.compute_src_dst_node_temporal_embeddings(  # type: ignore[attr-defined]
                 src_node_ids=sources,
                 dst_node_ids=destinations,
@@ -507,7 +507,7 @@ class DyGLibLinkBaseline(nn.Module, SharedLinkProtocol):
         )
 
     @torch.no_grad()
-    def _evaluate_tgn(
+    def _evaluate_memory_model(
         self,
         windows: Sequence[Sequence[Snapshot]],
         history_windows: Sequence[Sequence[Snapshot]],
@@ -568,7 +568,7 @@ class DyGLibLinkBaseline(nn.Module, SharedLinkProtocol):
                 event_cursor = through
             self._advance_memory(target.take(slice(event_cursor, len(target))))
         if not score_parts:
-            raise ValueError("TGN evaluation produced no queries")
+            raise ValueError(f"{self.model_name} evaluation produced no queries")
         return self.metrics(
             torch.cat(label_parts), torch.cat(score_parts), torch.cat(group_parts)
         )
@@ -581,7 +581,7 @@ class DyGLibLinkBaseline(nn.Module, SharedLinkProtocol):
         query_seed: int = 42,
     ) -> dict[str, float]:
         if self.is_memory_model:
-            return self._evaluate_tgn(windows, history_windows, query_seed)
+            return self._evaluate_memory_model(windows, history_windows, query_seed)
         return self._evaluate_stateless(windows, query_seed)
 
 

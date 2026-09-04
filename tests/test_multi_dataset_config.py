@@ -27,6 +27,8 @@ def test_link_multi_dataset_config_expands_aligned_overrides() -> None:
     assert expanded["mooc"]["tgn"]["interaction_feature_dim"] == 172
     assert expanded["lastfm"]["dygformer"]["interaction_feature_dim"] == 172
     assert expanded["mooc"]["tgat"]["interaction_feature_dim"] == 172
+    assert expanded["mooc"]["dyrep"]["interaction_feature_dim"] == 172
+    assert expanded["lastfm"]["dyrep"]["interaction_feature_dim"] == 172
 
     assert expanded["mooc"]["tgn"]["dropout"] == 0.2
     assert expanded["lastfm"]["cawn"]["num_neighbors"] == 128
@@ -35,6 +37,9 @@ def test_link_multi_dataset_config_expands_aligned_overrides() -> None:
     assert "jodie" not in expanded["canparl"]["models"]
     assert "rcps_jepa" in expanded["canparl"]["models"]
     assert expanded["canparl"]["tgat"]["uniform_neighbors"] is True
+    assert expanded["canparl"]["dyrep"]["sample_neighbor_strategy"] == "uniform"
+    assert expanded["contacts"]["dyrep"]["dropout"] == 0.0
+    assert expanded["flights"]["dyrep"]["dropout"] == 0.1
     assert expanded["unvote"]["tgn"]["sample_neighbor_strategy"] == "uniform"
     assert expanded["enron"]["dygformer"]["dropout"] == 0.0
 

@@ -28,15 +28,18 @@ jodie:
   tbatch_count: 500
   state_change: false
 
-# DyRep paper mechanism adapted to Wikipedia's single communication-event
-# stream.  The original paper has two event types; Wikipedia has no separate
-# association process, so one point-process intensity is used here.
+# Author-maintained DyGLib DyRep configuration. Only the outer split and
+# evaluation candidate set are shared with the other comparison methods.
 dyrep:
-  hidden_dim: 32
-  neighbor_count: 20
-  survival_samples: 5
+  interaction_feature_dim: 172
+  time_feat_dim: 100
+  num_layers: 1
+  num_heads: 2
+  num_neighbors: 10
+  dropout: 0.0
+  sample_neighbor_strategy: recent
   train_batch_size: 200
-  survival_weight: 1.0
+  eval_pair_batch_size: 200
 
 # Official TGAT Wikipedia architecture and sampling defaults.
 tgat:
@@ -53,7 +56,7 @@ tgat:
 # repository's Wikipedia best/default configurations; only our outer split and
 # evaluation candidate set are shared across methods.
 additional_baselines:
-  enabled: [edgebank, tgn, cawn, tcl, graphmixer, dygformer]
+  enabled: [edgebank, dyrep, tgn, cawn, tcl, graphmixer, dygformer]
 
 # Discrete-time self-supervised representation baselines.  All three see only
 # the chronological training snapshots during SSL pretraining; their encoders
@@ -223,12 +226,12 @@ jodie_training:
   weight_decay: 0.00001
   grad_clip: 1.0
 
-# LDG's scalable DyRep-baseline defaults (native optimizer/objective).
+# DyGLib native optimizer defaults for DyRep.
 dyrep_training:
-  epochs: 5
-  learning_rate: 0.0002
+  epochs: 100
+  learning_rate: 0.0001
   weight_decay: 0.0
-  betas: [0.5, 0.999]
+  betas: [0.9, 0.999]
   grad_clip: 1.0
 
 # TGAT author-code defaults for Wikipedia link prediction.

@@ -3,7 +3,7 @@
 - Upstream: `https://github.com/yule-BUAA/DyGLib`
 - Commit: `3aacc36b94b8d2d8293d70a74fdf6d39089b4163`
 - License: MIT; the upstream license is preserved in `LICENSE`.
-- Vendored modules: `MemoryModel.py` (TGN), `CAWN.py`, `TCL.py`,
+- Vendored modules: `MemoryModel.py` (DyRep/TGN), `CAWN.py`, `TCL.py`,
   `GraphMixer.py`, `DyGFormer.py`, and `modules.py`.
 - Local changes to vendored model files: package-relative imports only.
 - `sampler.py` contains the upstream `NeighborSampler` class.  Dataset
