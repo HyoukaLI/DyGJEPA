@@ -62,22 +62,6 @@ untrade    unvote  uslegis  enron  uci
 
 ## 4. Run the experiments
 
-Run the smallest end-to-end smoke test first. This evaluates only EdgeBank on
-USLegis, performs no neural-network training, and writes outside the repository:
-
-```bash
-MODELS=edgebank EPOCHS=1 SEEDS=42 MAX_POSITIVE_PAIRS=8 \
-OUTPUT_DIR=/tmp/dygjepa-smoke \
-bash scripts/run_link_datasets.sh uslegis
-```
-
-A successful run creates:
-
-```text
-/tmp/dygjepa-smoke/link_comparison_uslegis.json
-/tmp/dygjepa-smoke/link_comparison_all.json
-```
-
 Run all configured datasets sequentially:
 
 ```bash
