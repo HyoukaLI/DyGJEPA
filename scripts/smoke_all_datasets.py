@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 import traceback
 from pathlib import Path
 from time import perf_counter
@@ -9,13 +10,16 @@ from time import perf_counter
 import torch
 import yaml
 
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
 from jepa_compare.compare_link_prediction import _dataset_configs, run as run_link
 from jepa_compare.compare_node_prediction import run as run_node
 from jepa_compare.data import load_npz, make_synthetic
 from jepa_compare.train_sg_jepa import run as run_sg
 
 
-ROOT = Path(__file__).resolve().parents[1]
 LINK_CONFIG = ROOT / "configs" / "link_comparison_all.yaml"
 NODE_SYNTHETIC = ROOT / "configs" / "node_comparison_synthetic.yaml"
 SG_SYNTHETIC = ROOT / "configs" / "sg_node_synthetic.yaml"
