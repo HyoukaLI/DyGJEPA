@@ -27,4 +27,21 @@ COMMAND=(
 if [[ "$#" -gt 0 ]]; then
   COMMAND+=(--datasets "$@")
 fi
+if [[ -n "${MODELS:-}" ]]; then
+  read -r -a SELECTED_MODELS <<< "$MODELS"
+  COMMAND+=(--models "${SELECTED_MODELS[@]}")
+fi
+if [[ -n "${EPOCHS:-}" ]]; then
+  COMMAND+=(--epochs "$EPOCHS")
+fi
+if [[ -n "${SEEDS:-}" ]]; then
+  read -r -a SELECTED_SEEDS <<< "$SEEDS"
+  COMMAND+=(--seeds "${SELECTED_SEEDS[@]}")
+fi
+if [[ -n "${MAX_POSITIVE_PAIRS:-}" ]]; then
+  COMMAND+=(--max-positive-pairs "$MAX_POSITIVE_PAIRS")
+fi
+if [[ -n "${OUTPUT_DIR:-}" ]]; then
+  COMMAND+=(--output "$OUTPUT_DIR")
+fi
 "${COMMAND[@]}"

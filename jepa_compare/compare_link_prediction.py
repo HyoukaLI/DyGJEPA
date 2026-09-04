@@ -550,6 +550,62 @@ def _deep_update(target: dict, updates: dict) -> dict:
     return target
 
 
+def _seed_values(config: dict) -> list[int]:
+    """Normalize a scalar or list-valued seed configuration."""
+    raw = config.get("seed", 42)
+    values = raw if isinstance(raw, list) else [raw]
+    if not values:
+        raise ValueError("seed list must not be empty")
+    seeds: list[int] = []
+    for value in values:
+        if isinstance(value, bool):
+            raise ValueError("seeds must be integers")
+        seed = int(value)
+        if seed in seeds:
+            raise ValueError(f"duplicate seed: {seed}")
+        seeds.append(seed)
+    return seeds
+
+
+def _aggregate_seed_runs(runs: dict[str, dict]) -> dict:
+    """Compute population mean/std for every numeric result metric."""
+    if not runs:
+        raise ValueError("cannot aggregate an empty set of seed runs")
+    run_results = list(runs.values())
+    model_names = set(run_results[0])
+    if any(set(result) != model_names for result in run_results[1:]):
+        raise ValueError("all seed runs must contain the same models")
+    aggregate: dict[str, dict] = {}
+    for model_name in sorted(model_names):
+        aggregate[model_name] = {}
+        split_names = set(run_results[0][model_name])
+        for split_name in sorted(split_names):
+            metric_names = set(run_results[0][model_name][split_name])
+            if any(
+                set(result[model_name][split_name]) != metric_names
+                for result in run_results[1:]
+            ):
+                raise ValueError("all seed runs must contain the same metrics")
+            aggregate[model_name][split_name] = {}
+            for metric_name in sorted(metric_names):
+                values = np.asarray(
+                    [
+                        float(result[model_name][split_name][metric_name])
+                        for result in run_results
+                    ],
+                    dtype=np.float64,
+                )
+                aggregate[model_name][split_name][metric_name] = {
+                    "mean": float(values.mean()),
+                    "std": float(values.std(ddof=0)),
+                }
+    return aggregate
+
+
+def _seed_output_path(path: Path, seed: int) -> Path:
+    return path.with_name(f"{path.stem}_seed{seed}{path.suffix}")
+
+
 def _dataset_configs(config: dict) -> list[tuple[str, dict]]:
     """Expand one multi-dataset YAML into ordinary single-dataset configs."""
     entries = config.get("datasets")
@@ -623,6 +679,19 @@ def main() -> None:
     parser.add_argument("--config", type=Path, default=Path("configs/link_comparison_wikipedia.yaml"))
     parser.add_argument("--epochs", type=int, default=None, help="override comparison epochs")
     parser.add_argument(
+        "--seeds",
+        nargs="+",
+        type=int,
+        default=None,
+        help="override the configured seed list",
+    )
+    parser.add_argument(
+        "--max-positive-pairs",
+        type=int,
+        default=None,
+        help="override validation/test positives per target window",
+    )
+    parser.add_argument(
         "--models",
         nargs="+",
         default=None,
@@ -638,6 +707,8 @@ def main() -> None:
     args = parser.parse_args()
     with args.config.open() as handle:
         config = yaml.safe_load(handle)
+    if args.seeds is not None:
+        config["seed"] = args.seeds[0] if len(args.seeds) == 1 else args.seeds
     if args.datasets:
         if not config.get("datasets"):
             raise ValueError("--datasets requires a multi-dataset config")
@@ -657,6 +728,12 @@ def main() -> None:
         ]
     if args.models:
         config["models"] = args.models
+    if args.max_positive_pairs is not None:
+        if args.max_positive_pairs < 1:
+            raise ValueError("--max-positive-pairs must be positive")
+        config.setdefault("link", {})["max_positive_pairs"] = (
+            args.max_positive_pairs
+        )
     if args.output is not None:
         if config.get("datasets"):
             config["output_dir"] = str(args.output)
@@ -682,18 +759,50 @@ def main() -> None:
             settings = config.setdefault(f"{model_name}_training", {})
             settings["pretrain_epochs"] = args.epochs
             settings["probe_epochs"] = args.epochs
+    seeds = _seed_values(config)
     dataset_results = {}
     for dataset_name, dataset_config in _dataset_configs(config):
-        print(
-            json.dumps(
-                {
-                    "dataset": dataset_name,
-                    "data": dataset_config["data"]["path"],
-                    "output": dataset_config.get("output_path"),
-                }
+        base_output = Path(dataset_config["output_path"])
+        if len(seeds) == 1:
+            dataset_config["seed"] = seeds[0]
+            print(
+                json.dumps(
+                    {
+                        "dataset": dataset_name,
+                        "seed": seeds[0],
+                        "data": dataset_config["data"]["path"],
+                        "output": str(base_output),
+                    }
+                )
             )
-        )
-        dataset_results[dataset_name] = run(dataset_config)
+            dataset_results[dataset_name] = run(dataset_config)
+            continue
+
+        runs: dict[str, dict] = {}
+        for seed in seeds:
+            seeded_config = deepcopy(dataset_config)
+            seeded_config["seed"] = seed
+            seeded_output = _seed_output_path(base_output, seed)
+            seeded_config["output_path"] = str(seeded_output)
+            print(
+                json.dumps(
+                    {
+                        "dataset": dataset_name,
+                        "seed": seed,
+                        "data": seeded_config["data"]["path"],
+                        "output": str(seeded_output),
+                    }
+                )
+            )
+            runs[str(seed)] = run(seeded_config)
+        dataset_summary = {
+            "seeds": seeds,
+            "runs": runs,
+            "aggregate": _aggregate_seed_runs(runs),
+        }
+        base_output.parent.mkdir(parents=True, exist_ok=True)
+        base_output.write_text(json.dumps(dataset_summary, indent=2))
+        dataset_results[dataset_name] = dataset_summary
     if config.get("datasets") and config.get("summary_output_path"):
         summary_path = Path(config["summary_output_path"])
         summary_path.parent.mkdir(parents=True, exist_ok=True)

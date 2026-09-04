@@ -5,14 +5,13 @@ needed to run the dynamic link-prediction comparisons.
 
 ## 1. Clone the repository
 
-Git LFS is required because the processed datasets are stored as LFS objects.
-Do not use GitHub's **Download ZIP** option.
+Use Git rather than GitHub's **Download ZIP** option so the checked-out commit
+and later updates are reproducible. The processed datasets are included in the
+repository.
 
 ```bash
-git lfs install
 git clone https://github.com/HyoukaLI/DyGJEPA.git
 cd DyGJEPA
-git lfs pull
 ```
 
 For a private repository, use a GitHub personal access token when Git asks for
@@ -48,8 +47,7 @@ installing this project if it is not already available.
 
 ## 3. Check the datasets
 
-After `git lfs pull`, the following command should list the processed `.npz`
-files rather than small Git LFS pointer files:
+The following command should list the processed `.npz` files:
 
 ```bash
 ls -lh data/processed/*.npz
@@ -64,10 +62,33 @@ untrade    unvote  uslegis  enron  uci
 
 ## 4. Run the experiments
 
+Run the smallest end-to-end smoke test first. This evaluates only EdgeBank on
+USLegis, performs no neural-network training, and writes outside the repository:
+
+```bash
+MODELS=edgebank EPOCHS=1 SEEDS=42 MAX_POSITIVE_PAIRS=8 \
+OUTPUT_DIR=/tmp/dygjepa-smoke \
+bash scripts/run_link_datasets.sh uslegis
+```
+
+A successful run creates:
+
+```text
+/tmp/dygjepa-smoke/link_comparison_uslegis.json
+/tmp/dygjepa-smoke/link_comparison_all.json
+```
+
 Run all configured datasets sequentially:
 
 ```bash
 bash scripts/run_link_datasets.sh
+```
+
+The unified configuration runs seeds `42, 44, 46, 48, 50`. Each model is
+reinitialized independently for every seed. To override the seed list:
+
+```bash
+SEEDS="42 44" bash scripts/run_link_datasets.sh wikipedia
 ```
 
 Run only selected datasets with the same configuration and protocol:
@@ -121,9 +142,14 @@ sbatch run_link_datasets.sbatch
 Per-dataset and combined results are written to:
 
 ```text
+results/link_comparison_<dataset>_seed<seed>.json
 results/link_comparison_<dataset>.json
 results/link_comparison_all.json
 ```
+
+The seed-specific files contain raw metrics. The dataset-level and combined
+files additionally contain population mean and standard deviation across the
+five runs.
 
 Local logs and result files are ignored by Git. Send the generated JSON files
 back to the experiment owner separately unless explicitly asked to commit them.
@@ -133,16 +159,8 @@ back to the experiment owner separately unless explicitly asked to commit them.
 ### Missing processed datasets
 
 ```bash
-git lfs pull
-```
-
-### `git lfs` is not installed
-
-Install Git LFS using the package manager available on the machine, then run:
-
-```bash
-git lfs install
-git lfs pull
+git pull
+git checkout -- data/processed
 ```
 
 ### Python executable not found

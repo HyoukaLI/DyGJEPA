@@ -1,4 +1,4 @@
-seed: [42,44,46,48,50]
+seed: [42, 44, 46, 48, 50]
 device: auto
 output_dir: results
 summary_output_path: results/link_comparison_all.json
