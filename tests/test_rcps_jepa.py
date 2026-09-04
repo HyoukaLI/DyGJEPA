@@ -1,3 +1,4 @@
+import numpy as np
 import torch
 
 from jepa_compare.compare_link_prediction import _train_one
@@ -17,7 +18,11 @@ from jepa_compare.link_prediction import (
 )
 from jepa_compare.rcps_jepa import RCPSJEPA
 from jepa_compare.signature import truncated_signature
-from jepa_compare.temporal_event_utils import unique_snapshots
+from jepa_compare.temporal_event_utils import (
+    EventStream,
+    TemporalNeighborIndex,
+    unique_snapshots,
+)
 from jepa_compare.tgat_baseline import TGATLinkBaseline
 
 
@@ -253,7 +258,7 @@ def test_tgat_keeps_recursive_temporal_attention_and_raw_edge_features() -> None
         num_nodes=7,
         bipartite_source_count=3,
         interaction_feature_dim=2,
-        num_layers=1,
+        num_layers=2,
         num_heads=2,
         num_neighbors=2,
         train_batch_size=3,
@@ -270,6 +275,52 @@ def test_tgat_keeps_recursive_temporal_attention_and_raw_edge_features() -> None
     validation = model.evaluate_protocol(windows[1:2], windows[:1], query_seed=7)
     assert validation["examples"] == 4
     assert 0 <= validation["auc"] <= 1
+
+
+def test_temporal_neighbor_index_accepts_an_empty_batch() -> None:
+    stream = EventStream(
+        sources=torch.tensor([0]),
+        destinations=torch.tensor([1]),
+        timestamps=torch.tensor([1.0]),
+        features=torch.zeros(1, 2),
+    )
+    index = TemporalNeighborIndex(stream, num_nodes=2)
+    nodes, events, times, mask = index.sample(
+        torch.empty(0, dtype=torch.long),
+        torch.empty(0),
+        count=3,
+        uniform=False,
+        rng=np.random.default_rng(1),
+        device=torch.device("cpu"),
+    )
+    assert nodes.shape == events.shape == times.shape == mask.shape == (0, 3)
+
+
+def test_tgat_empty_pair_batch_returns_empty_logits() -> None:
+    model = TGATLinkBaseline(
+        feature_dim=2,
+        num_nodes=2,
+        bipartite_source_count=None,
+        interaction_feature_dim=2,
+        num_layers=2,
+        num_heads=2,
+        num_neighbors=2,
+    )
+    stream = EventStream(
+        sources=torch.tensor([0]),
+        destinations=torch.tensor([1]),
+        timestamps=torch.tensor([1.0]),
+        features=torch.zeros(1, 2),
+    )
+    index = TemporalNeighborIndex(stream, num_nodes=2)
+    logits = model._score_pairs(
+        torch.empty(0, dtype=torch.long),
+        torch.empty(0, dtype=torch.long),
+        torch.empty(0),
+        index,
+        np.random.default_rng(1),
+    )
+    assert logits.shape == (0,)
 
 
 def test_jodie_keeps_stream_state_under_shared_query_protocol() -> None:

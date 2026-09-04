@@ -168,6 +168,19 @@ class TemporalNeighborIndex:
     ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
         if count < 1:
             raise ValueError("neighbor count must be positive")
+        if nodes.numel() != cut_times.numel():
+            raise ValueError(
+                "nodes and cut_times must contain the same number of rows"
+            )
+        if nodes.numel() == 0:
+            shape = (0, count)
+            neighbor_nodes = torch.empty(shape, dtype=torch.long, device=device)
+            neighbor_events = torch.empty(shape, dtype=torch.long, device=device)
+            neighbor_times = torch.empty(
+                shape, dtype=cut_times.dtype, device=device
+            )
+            padding_mask = torch.empty(shape, dtype=torch.bool, device=device)
+            return neighbor_nodes, neighbor_events, neighbor_times, padding_mask
         node_rows: list[np.ndarray] = []
         event_rows: list[np.ndarray] = []
         time_rows: list[np.ndarray] = []

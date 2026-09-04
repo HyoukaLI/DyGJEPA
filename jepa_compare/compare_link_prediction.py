@@ -330,11 +330,15 @@ def run(config: dict) -> dict[str, dict[str, dict[str, float]]]:
         float(split_cfg.get("validation_ratio", 0.2)),
     )
     link_cfg = dict(config.get("link", {}))
-    if graph.num_source_nodes is not None:
-        configured = link_cfg.get("bipartite_source_count")
-        if configured is not None and int(configured) != graph.num_source_nodes:
-            raise ValueError("configured bipartite split disagrees with the dataset")
-        link_cfg["bipartite_source_count"] = graph.num_source_nodes
+    configured = link_cfg.get("bipartite_source_count")
+    if configured is not None and (
+        graph.num_source_nodes is None
+        or int(configured) != graph.num_source_nodes
+    ):
+        raise ValueError("configured bipartite split disagrees with the dataset")
+    # Keep this key present for both graph types. Snapshot SSL baselines use
+    # None to select homogeneous negative sampling.
+    link_cfg["bipartite_source_count"] = graph.num_source_nodes
     rcps_args = {
         "num_nodes": graph.num_nodes,
         **common,

@@ -212,7 +212,7 @@ class SnapshotSSLLinkBaseline(nn.Module, ABC):
         max_positive_pairs: int | None,
         new_edges_only: bool,
         undirected: bool,
-        bipartite_source_count: int | None,
+        bipartite_source_count: int | None = None,
     ) -> None:
         super().__init__()
         self.embedding_dim = int(embedding_dim)

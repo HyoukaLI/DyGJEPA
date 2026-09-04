@@ -72,6 +72,44 @@ def _link_kwargs() -> dict:
     }
 
 
+def _homogeneous_link_kwargs() -> dict:
+    kwargs = _link_kwargs()
+    kwargs.pop("bipartite_source_count")
+    return kwargs
+
+
+def test_snapshot_ssl_defaults_to_homogeneous_negative_sampling() -> None:
+    models = [
+        CLDGLinkBaseline(
+            feature_dim=5,
+            hidden_dim=8,
+            embedding_dim=8,
+            num_layers=1,
+            num_spans=2,
+            num_views=2,
+            contrastive_batch_size=8,
+            **_homogeneous_link_kwargs(),
+        ),
+        MaskDGNNLinkBaseline(
+            feature_dim=5,
+            hidden_dim=8,
+            num_layers=1,
+            window_size=2,
+            pretrain_pair_limit=8,
+            **_homogeneous_link_kwargs(),
+        ),
+        DVGMAELinkBaseline(
+            feature_dim=5,
+            hidden_dim=8,
+            num_layers=1,
+            window_size=2,
+            pretrain_pair_limit=8,
+            **_homogeneous_link_kwargs(),
+        ),
+    ]
+    assert all(model.bipartite_source_count is None for model in models)
+
+
 def test_cldg_pretrain_and_frozen_link_probe() -> None:
     _exercise(
         CLDGLinkBaseline(

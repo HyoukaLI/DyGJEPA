@@ -56,9 +56,16 @@ class NeighborSampler:
         node_neighbor_times = node_neighbor_times - np.max(node_neighbor_times)
         # compute the normalized sampled probabilities of historical neighbors
         exp_node_neighbor_times = np.exp(self.time_scaling_factor * node_neighbor_times)
-        sampled_probabilities = exp_node_neighbor_times / np.cumsum(exp_node_neighbor_times)
-        # note that the first few values in exp_node_neighbor_times may be all zero, which make the corresponding values in sampled_probabilities
-        # become nan (divided by zero), so we replace the nan by a very large negative number -1e10 to denote the sampled probabilities
+        cumulative = np.cumsum(exp_node_neighbor_times)
+        sampled_probabilities = np.full_like(exp_node_neighbor_times, -1e10)
+        np.divide(
+            exp_node_neighbor_times,
+            cumulative,
+            out=sampled_probabilities,
+            where=cumulative != 0,
+        )
+        # Preserve the official sentinel for zero cumulative mass without
+        # emitting divide-by-zero warnings.
         sampled_probabilities[np.isnan(sampled_probabilities)] = -1e10
         return sampled_probabilities
 

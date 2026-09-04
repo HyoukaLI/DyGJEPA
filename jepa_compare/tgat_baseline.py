@@ -183,6 +183,8 @@ class TGATLinkBaseline(nn.Module, SharedLinkProtocol):
         index: TemporalNeighborIndex,
         rng: np.random.Generator,
     ) -> Tensor:
+        if sources.numel() == 0:
+            return torch.empty(0, dtype=times.dtype, device=times.device)
         source = self._temporal_embedding(
             sources, times, self.num_layers, index, rng
         )
@@ -209,6 +211,8 @@ class TGATLinkBaseline(nn.Module, SharedLinkProtocol):
         batches = 0
         for start in range(0, len(stream), self.train_batch_size):
             rows = order[start : start + self.train_batch_size]
+            if rows.numel() == 0:
+                continue
             sources = stream.sources[rows]
             positives = stream.destinations[rows]
             times = stream.timestamps[rows]
