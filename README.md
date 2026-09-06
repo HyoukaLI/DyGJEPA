@@ -105,6 +105,13 @@ Run all three node-prediction datasets under the same model/probe protocol:
 bash scripts/run_node_datasets.sh
 ```
 
+The node runner uses seeds `42, 44, 46, 48, 50` by default. Override them for
+a smoke test or a partial rerun with:
+
+```bash
+SEEDS="42" EPOCHS=1 BASELINES="" bash scripts/run_node_datasets.sh tmall
+```
+
 Run only Tmall and Patent (the `tsmall` alias is also accepted):
 
 ```bash
@@ -121,6 +128,17 @@ BASELINES="" EPOCHS=1 bash scripts/run_node_datasets.sh tmall
 The shared node configuration is `configs/node_comparison_all.yaml`; it
 inherits the established DBLP settings and changes only dataset paths and the
 node batch size (1024 for Tmall, 2048 for Patent).
+
+Multi-seed node results are written to:
+
+```text
+results/node_comparison_<dataset>_seed<seed>.json
+results/node_comparison_<dataset>.json
+results/node_comparison_all.json
+```
+
+The seed-specific files contain raw metrics. Dataset-level files contain all
+five runs plus population mean and standard deviation for every numeric metric.
 
 ## 5. Run on Slurm
 

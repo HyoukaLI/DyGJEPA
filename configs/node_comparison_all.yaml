@@ -2,6 +2,7 @@
 # from the established DBLP comparison; only data paths and dataset-scale batch
 # sizes change. "tsmall" is accepted by the CLI as an alias for official Tmall.
 extends: node_comparison_dblp.yaml
+seed: [42, 44, 46, 48, 50]
 summary_output_path: results/node_comparison_all.json
 
 datasets:

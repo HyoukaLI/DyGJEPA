@@ -52,4 +52,8 @@ fi
 if [[ -n "${EPOCHS:-}" ]]; then
   COMMAND+=(--epochs "$EPOCHS")
 fi
+if [[ -n "${SEEDS:-}" ]]; then
+  read -r -a SELECTED_SEEDS <<< "$SEEDS"
+  COMMAND+=(--seeds "${SELECTED_SEEDS[@]}")
+fi
 "${COMMAND[@]}"
