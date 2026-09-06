@@ -100,6 +100,13 @@ reproduces the official labeled-node-first ordering. The generated
 Tmall/Patent NPZ files are intentionally ignored by Git because they are too
 large for normal GitHub storage.
 
+Expected archives under the shared 4-D structural-feature protocol are:
+
+| Dataset | Merged snapshots | Nodes | Labeled nodes | Classes | Final raw edges |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Tmall | 19 | 577,314 | 81,380 | 5 | 4,807,545 |
+| Patent | 13 | 2,738,012 | 2,738,012 | 6 | 13,960,811 |
+
 ## 4. Run the experiments
 
 Run all configured datasets sequentially:
