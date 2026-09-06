@@ -61,52 +61,6 @@ wikipedia  mooc  lastfm  canparl  contacts  flights
 untrade    unvote  uslegis  enron  uci
 ```
 
-The unified node-prediction configuration includes `dblp`, `tmall`, and
-`patent`. The official dataset name is **Tmall**; the runner also accepts
-`tsmall` as a convenience alias.
-
-### Prepare Tmall and Patent node datasets
-
-Download the raw data from the
-[official SpikeNet repository](https://github.com/EdisonLeeeee/SpikeNet), then
-place the files as follows:
-
-```text
-data/raw/tmall/tmall.txt
-data/raw/tmall/node2label.txt
-data/raw/patent/patent_edges.json
-data/raw/patent/patent_nodes.json
-```
-
-Convert the official formats to the common DYGJEPA snapshot archive:
-
-```bash
-python scripts/prepare_spikenet_node.py --dataset tmall
-python scripts/prepare_spikenet_node.py --dataset patent
-```
-
-When no `.npy` is present, the converter generates the same 4-D structural
-fallback used by the packaged DBLP archive. This is the correct setting for
-comparisons against the current DBLP experiment. To reproduce the SG-JEPA
-paper's feature protocol instead, download the optional official 80-D
-`tmall.npy`/`patent.npy` and place it in the corresponding raw directory (or
-pass `--features PATH`). Do not mix the 4-D and 80-D feature protocols within
-one comparison table.
-
-The converter follows the official temporal aggregation: 10 original time
-steps per Tmall snapshot and 2 per Patent snapshot. It preserves unlabeled
-Tmall nodes in the graph while excluding them from the downstream probe, and
-reproduces the official labeled-node-first ordering. The generated
-Tmall/Patent NPZ files are intentionally ignored by Git because they are too
-large for normal GitHub storage.
-
-Expected archives under the shared 4-D structural-feature protocol are:
-
-| Dataset | Merged snapshots | Nodes | Labeled nodes | Classes | Final raw edges |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| Tmall | 19 | 577,314 | 81,380 | 5 | 4,807,545 |
-| Patent | 13 | 2,738,012 | 2,738,012 | 6 | 13,960,811 |
-
 ## 4. Run the experiments
 
 Run all configured datasets sequentially:
