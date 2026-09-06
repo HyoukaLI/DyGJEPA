@@ -15,6 +15,7 @@ from .temporal_event_utils import (
     SharedLinkProtocol,
     TemporalAttentionLayer,
     TemporalNeighborIndex,
+    seeded_torch_generator,
     stream_events,
     unique_snapshots,
 )
@@ -204,8 +205,12 @@ class TGATLinkBaseline(nn.Module, SharedLinkProtocol):
         if self._train_stream is None or self._train_index is None:
             raise RuntimeError("call prepare_streams before TGAT training")
         stream, index = self._train_stream, self._train_index
-        generator = torch.Generator().manual_seed(seed)
-        order = torch.randperm(len(stream), generator=generator).to(stream.sources.device)
+        generator, random_device = seeded_torch_generator(
+            stream.sources.device, seed
+        )
+        order = torch.randperm(
+            len(stream), generator=generator, device=random_device
+        ).to(stream.sources.device)
         rng = np.random.default_rng(seed)
         total_loss = 0.0
         batches = 0
@@ -219,7 +224,7 @@ class TGATLinkBaseline(nn.Module, SharedLinkProtocol):
             negative_start = 0 if self.num_users is None else self.num_users
             negatives = torch.randint(
                 negative_start, self.num_nodes, positives.shape,
-                generator=generator, device="cpu",
+                generator=generator, device=random_device,
             ).to(positives.device)
             collision = negatives == positives
             if self.num_users is None:
@@ -230,7 +235,7 @@ class TGATLinkBaseline(nn.Module, SharedLinkProtocol):
                     self.num_nodes,
                     (int(collision.sum()),),
                     generator=generator,
-                    device="cpu",
+                    device=random_device,
                 ).to(positives.device)
                 collision = negatives == positives
                 if self.num_users is None:

@@ -1262,7 +1262,7 @@ class RCPSJEPA(nn.Module):
 
         if backward:
             total = sum(detached_losses) / total_batches
-            return torch.tensor(total), {
+            return torch.as_tensor(total, device=next(self.parameters()).device), {
                 name: value / total_batches for name, value in metric_sums.items()
             } | {"loss": total}
 

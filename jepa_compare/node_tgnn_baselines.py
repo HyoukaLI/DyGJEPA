@@ -36,6 +36,7 @@ from .temporal_event_utils import (
     MergeLayer,
     TemporalAttentionLayer,
     TemporalNeighborIndex,
+    seeded_torch_generator,
 )
 
 
@@ -777,8 +778,12 @@ class TGATNodeSSL(nn.Module):
         if self.stream is None:
             raise RuntimeError("call prepare before TGAT training")
         stream = self.stream
-        generator = torch.Generator().manual_seed(seed)
-        order = torch.randperm(len(stream), generator=generator).to(stream.sources.device)
+        generator, random_device = seeded_torch_generator(
+            stream.sources.device, seed
+        )
+        order = torch.randperm(
+            len(stream), generator=generator, device=random_device
+        ).to(stream.sources.device)
         rng = np.random.default_rng(seed)
         total_loss, batches = 0.0, 0
         for start in range(0, len(stream), self.batch_size):
@@ -790,7 +795,7 @@ class TGATNodeSSL(nn.Module):
                 self.num_nodes,
                 positive.shape,
                 generator=generator,
-                device="cpu",
+                device=random_device,
             ).to(positive.device)
             collision = (negative == positive) | (negative == source)
             while collision.any():
@@ -798,7 +803,7 @@ class TGATNodeSSL(nn.Module):
                     self.num_nodes,
                     (int(collision.sum()),),
                     generator=generator,
-                    device="cpu",
+                    device=random_device,
                 ).to(positive.device)
                 negative[collision] = replacement
                 collision = (negative == positive) | (negative == source)

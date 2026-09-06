@@ -256,14 +256,20 @@ class DyGFormer(nn.Module):
         :return:
         """
         # Tensor, shape (batch_size, max_seq_length, node_feat_dim)
-        padded_nodes_neighbor_node_raw_features = self.node_raw_features[torch.from_numpy(padded_nodes_neighbor_ids)]
+        node_indices = torch.as_tensor(
+            padded_nodes_neighbor_ids, dtype=torch.long, device=self.device
+        )
+        edge_indices = torch.as_tensor(
+            padded_nodes_edge_ids, dtype=torch.long, device=self.device
+        )
+        padded_nodes_neighbor_node_raw_features = self.node_raw_features[node_indices]
         # Tensor, shape (batch_size, max_seq_length, edge_feat_dim)
-        padded_nodes_edge_raw_features = self.edge_raw_features[torch.from_numpy(padded_nodes_edge_ids)]
+        padded_nodes_edge_raw_features = self.edge_raw_features[edge_indices]
         # Tensor, shape (batch_size, max_seq_length, time_feat_dim)
         padded_nodes_neighbor_time_features = time_encoder(timestamps=torch.from_numpy(node_interact_times[:, np.newaxis] - padded_nodes_neighbor_times).float().to(self.device))
 
         # ndarray, set the time features to all zeros for the padded timestamp
-        padded_nodes_neighbor_time_features[torch.from_numpy(padded_nodes_neighbor_ids == 0)] = 0.0
+        padded_nodes_neighbor_time_features[node_indices == 0] = 0.0
 
         return padded_nodes_neighbor_node_raw_features, padded_nodes_edge_raw_features, padded_nodes_neighbor_time_features
 
@@ -386,9 +392,21 @@ class NeighborCooccurrenceEncoder(nn.Module):
 
         # set the appearances of the padded node (with zero index) to zeros
         # Tensor, shape (batch_size, src_max_seq_length, 2)
-        src_padded_nodes_appearances[torch.from_numpy(src_padded_nodes_neighbor_ids == 0)] = 0.0
+        src_padded_nodes_appearances[
+            torch.as_tensor(
+                src_padded_nodes_neighbor_ids == 0,
+                dtype=torch.bool,
+                device=src_padded_nodes_appearances.device,
+            )
+        ] = 0.0
         # Tensor, shape (batch_size, dst_max_seq_length, 2)
-        dst_padded_nodes_appearances[torch.from_numpy(dst_padded_nodes_neighbor_ids == 0)] = 0.0
+        dst_padded_nodes_appearances[
+            torch.as_tensor(
+                dst_padded_nodes_neighbor_ids == 0,
+                dtype=torch.bool,
+                device=dst_padded_nodes_appearances.device,
+            )
+        ] = 0.0
 
         return src_padded_nodes_appearances, dst_padded_nodes_appearances
 

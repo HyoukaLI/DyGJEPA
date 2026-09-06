@@ -15,6 +15,20 @@ fi
 cd "$PROJECT_DIR"
 mkdir -p logs results
 
+"$PYTHON_BIN" - <<'PY'
+import os
+import torch
+
+device = "cuda" if torch.cuda.is_available() else (
+    "mps" if torch.backends.mps.is_available() else "cpu"
+)
+print(f"torch={torch.__version__} runtime_device={device}", flush=True)
+if os.environ.get("REQUIRE_CUDA", "0") == "1" and device != "cuda":
+    raise SystemExit("REQUIRE_CUDA=1, but this PyTorch runtime cannot use CUDA")
+if device == "cuda":
+    print(f"cuda_device={torch.cuda.get_device_name(torch.cuda.current_device())}", flush=True)
+PY
+
 if [[ ! -f data/processed/wikipedia.npz ]]; then
   echo "Missing processed datasets. Run 'git lfs pull' first." >&2
   exit 1

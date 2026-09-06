@@ -46,6 +46,14 @@ python -m pip install -e .
 On a GPU cluster, install the PyTorch build required by the cluster before
 installing this project if it is not already available.
 
+All experiment configurations use `device: auto`, which selects CUDA first,
+then Apple MPS, and finally CPU. The runners print `runtime_device` before
+training. Set `REQUIRE_CUDA=1` to fail instead of silently falling back to CPU:
+
+```bash
+REQUIRE_CUDA=1 bash scripts/run_link_datasets.sh wikipedia
+```
+
 ## 3. Check the datasets
 
 The following command should list the processed `.npz` files:
@@ -104,6 +112,23 @@ Run all three node-prediction datasets under the same model/probe protocol:
 ```bash
 bash scripts/run_node_datasets.sh
 ```
+
+On the configured Slurm cluster, submit GPU-enforced link or node jobs with:
+
+```bash
+sbatch run_link_datasets.sbatch
+sbatch run_node_datasets.sbatch
+```
+
+Both Slurm launchers stop immediately if the selected PyTorch environment
+cannot see CUDA. Override datasets without changing the shared protocol, for
+example `DATASET_NAMES="tmall patent" sbatch run_node_datasets.sbatch`.
+
+Model forward/backward passes, negative sampling, masking, and link metrics run
+on CUDA when available. Dataset parsing and the official temporal-neighbor
+indices remain on CPU by design: they use NumPy search structures and moving
+them per query would add synchronization overhead. Checkpoints are also copied
+to CPU so validation snapshots do not occupy extra GPU memory.
 
 The node runner uses seeds `42, 44, 46, 48, 50` by default. Override them for
 a smoke test or a partial rerun with:

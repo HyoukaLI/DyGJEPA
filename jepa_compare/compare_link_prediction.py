@@ -24,7 +24,12 @@ from .snapshot_ssl_baselines import (
 )
 from .temporal_event_utils import unique_snapshots
 from .tgat_baseline import TGATLinkBaseline
-from .train_sg_jepa import choose_device, cpu_state_dict, release_device_memory
+from .train_sg_jepa import (
+    choose_device,
+    cpu_state_dict,
+    device_description,
+    release_device_memory,
+)
 
 
 def _build_graph(config: dict, seed: int):
@@ -315,6 +320,7 @@ def run(config: dict) -> dict[str, dict[str, dict[str, float]]]:
     np.random.seed(seed)
     torch.manual_seed(seed)
     device = choose_device(config.get("device", "auto"))
+    print(f"runtime_device={device_description(device)}", flush=True)
     graph = _build_graph(config, seed).to(device)
     requested = _requested_models(config)
 

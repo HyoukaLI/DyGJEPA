@@ -8,6 +8,8 @@ from jepa_compare.jodie_baseline import JODIELinkBaseline
 from jepa_compare.link_prediction import (
     NODE_EVENT_DIM,
     TemporalWindowSplit,
+    binary_average_precision,
+    binary_roc_auc,
     canonical_pairs,
     grouped_ranking_metrics,
     node_transition_statistics,
@@ -497,6 +499,22 @@ def test_temporal_window_split_is_chronological() -> None:
     split = temporal_window_split(graph.snapshots, 3, 0.5, 0.25)
     assert split.train[-1][-1].time < split.validation[0][-1].time
     assert split.validation[-1][-1].time < split.test[0][-1].time
+
+
+def test_vectorized_link_metrics_preserve_ties_and_group_ranks() -> None:
+    labels = torch.tensor([1.0, 0.0, 1.0, 0.0])
+    scores = torch.tensor([0.5, 0.5, 1.0, 0.0])
+    assert binary_average_precision(labels, scores) == 1.0
+    assert binary_roc_auc(labels, scores) == 0.875
+
+    group_labels = torch.tensor([0.0, 1.0, 1.0, 0.0, 0.0, 0.0])
+    group_scores = torch.tensor([0.8, 0.9, 0.7, 0.8, 0.1, 0.7])
+    group_ids = torch.tensor([9, 4, 9, 4, 9, 4])
+    mrr, recall = grouped_ranking_metrics(
+        group_labels, group_scores, group_ids, recall_k=1
+    )
+    assert mrr == 0.75
+    assert recall == 0.5
 
 
 def test_official_dyglib_backbones_follow_shared_protocol() -> None:

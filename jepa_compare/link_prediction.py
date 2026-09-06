@@ -499,27 +499,44 @@ def new_neighbor_mean_embeddings(
 
 
 def binary_average_precision(labels: Tensor, probabilities: Tensor) -> float:
-    labels = labels.detach().float().cpu()
-    probabilities = probabilities.detach().float().cpu()
+    labels = labels.detach().float()
+    probabilities = probabilities.detach().float().to(labels.device)
     positives = int(labels.sum().item())
     if positives == 0:
         return float("nan")
     order = torch.argsort(probabilities, descending=True, stable=True)
     ranked = labels[order]
-    precision = ranked.cumsum(0) / torch.arange(1, ranked.numel() + 1)
+    precision = ranked.cumsum(0) / torch.arange(
+        1, ranked.numel() + 1, device=ranked.device
+    )
     return float(precision[ranked.bool()].mean().item())
 
 
 def binary_roc_auc(labels: Tensor, probabilities: Tensor) -> float:
-    labels = labels.detach().float().cpu()
-    probabilities = probabilities.detach().float().cpu()
-    positive = probabilities[labels == 1]
-    negative = probabilities[labels == 0]
-    if positive.numel() == 0 or negative.numel() == 0:
+    labels = labels.detach().float()
+    probabilities = probabilities.detach().float().to(labels.device)
+    positive_count = int((labels == 1).sum().item())
+    negative_count = int((labels == 0).sum().item())
+    if positive_count == 0 or negative_count == 0:
         return float("nan")
-    comparisons = (positive[:, None] > negative[None, :]).float()
-    ties = (positive[:, None] == negative[None, :]).float()
-    return float((comparisons + 0.5 * ties).mean().item())
+
+    # Mann-Whitney rank statistic is exactly equivalent to pairwise AUC while
+    # requiring O(n), rather than O(n_positive * n_negative), intermediate
+    # memory. Average ranks preserve the conventional 0.5 credit for ties.
+    order = torch.argsort(probabilities, stable=True)
+    sorted_scores = probabilities[order]
+    sorted_labels = labels[order]
+    _, counts = torch.unique_consecutive(sorted_scores, return_counts=True)
+    ends = counts.cumsum(0)
+    starts = ends - counts
+    average_ranks = (
+        starts.to(probabilities.dtype) + 1.0 + ends.to(probabilities.dtype)
+    ) / 2.0
+    ranks = torch.repeat_interleave(average_ranks, counts)
+    positive_rank_sum = ranks[sorted_labels == 1].sum()
+    correction = positive_count * (positive_count + 1) / 2
+    auc = (positive_rank_sum - correction) / (positive_count * negative_count)
+    return float(auc.item())
 
 
 def grouped_ranking_metrics(
@@ -529,23 +546,42 @@ def grouped_ranking_metrics(
     recall_k: int = 10,
 ) -> tuple[float, float]:
     """Return MRR and Recall@K for one-positive candidate groups."""
-    labels = labels.detach().float().cpu()
-    probabilities = probabilities.detach().float().cpu()
-    group_ids = group_ids.detach().long().cpu()
-    reciprocal_ranks = []
-    recalls = []
-    for group in torch.unique(group_ids, sorted=True):
-        keep = group_ids == group
-        group_labels = labels[keep]
-        if int(group_labels.sum().item()) != 1:
-            raise ValueError("each ranking group must contain exactly one positive")
-        order = torch.argsort(probabilities[keep], descending=True, stable=True)
-        rank = int((group_labels[order] == 1).nonzero(as_tuple=False)[0].item()) + 1
-        reciprocal_ranks.append(1.0 / rank)
-        recalls.append(float(rank <= recall_k))
-    if not reciprocal_ranks:
+    labels = labels.detach().float()
+    probabilities = probabilities.detach().float().to(labels.device)
+    group_ids = group_ids.detach().long().to(labels.device)
+    if labels.numel() == 0:
         return float("nan"), float("nan")
+    _, inverse = torch.unique(group_ids, sorted=True, return_inverse=True)
+    group_count = int(inverse.max().item()) + 1
+    positive_counts = torch.zeros(
+        group_count, dtype=labels.dtype, device=labels.device
+    )
+    positive_counts.scatter_add_(0, inverse, labels)
+    if not torch.all(positive_counts == 1):
+        raise ValueError("each ranking group must contain exactly one positive")
+
+    # Stable sorts preserve the original candidate order for tied scores.
+    score_order = torch.argsort(probabilities, descending=True, stable=True)
+    group_order = torch.argsort(inverse[score_order], stable=True)
+    ordered_rows = score_order[group_order]
+    ordered_groups = inverse[ordered_rows]
+    positions = torch.arange(
+        ordered_rows.numel(), device=labels.device, dtype=torch.long
+    )
+    group_start_markers = torch.where(
+        torch.cat(
+            [
+                torch.ones(1, dtype=torch.bool, device=labels.device),
+                ordered_groups[1:] != ordered_groups[:-1],
+            ]
+        ),
+        positions,
+        torch.zeros_like(positions),
+    )
+    group_starts = torch.cummax(group_start_markers, dim=0).values
+    ranks = positions - group_starts + 1
+    positive_ranks = ranks[labels[ordered_rows] == 1].float()
     return (
-        float(sum(reciprocal_ranks) / len(reciprocal_ranks)),
-        float(sum(recalls) / len(recalls)),
+        float(positive_ranks.reciprocal().mean().item()),
+        float((positive_ranks <= recall_k).float().mean().item()),
     )

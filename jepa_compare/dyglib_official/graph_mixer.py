@@ -95,12 +95,18 @@ class GraphMixer(nn.Module):
                                                            num_neighbors=num_neighbors)
 
         # Tensor, shape (batch_size, num_neighbors, edge_feat_dim)
-        nodes_edge_raw_features = self.edge_raw_features[torch.from_numpy(neighbor_edge_ids)]
+        edge_indices = torch.as_tensor(
+            neighbor_edge_ids, dtype=torch.long, device=self.device
+        )
+        neighbor_indices = torch.as_tensor(
+            neighbor_node_ids, dtype=torch.long, device=self.device
+        )
+        nodes_edge_raw_features = self.edge_raw_features[edge_indices]
         # Tensor, shape (batch_size, num_neighbors, time_feat_dim)
         nodes_neighbor_time_features = self.time_encoder(timestamps=torch.from_numpy(node_interact_times[:, np.newaxis] - neighbor_times).float().to(self.device))
 
         # ndarray, set the time features to all zeros for the padded timestamp
-        nodes_neighbor_time_features[torch.from_numpy(neighbor_node_ids == 0)] = 0.0
+        nodes_neighbor_time_features[neighbor_indices == 0] = 0.0
 
         # Tensor, shape (batch_size, num_neighbors, edge_feat_dim + time_feat_dim)
         combined_features = torch.cat([nodes_edge_raw_features, nodes_neighbor_time_features], dim=-1)
@@ -122,22 +128,33 @@ class GraphMixer(nn.Module):
                                                                                           num_neighbors=time_gap)
 
         # Tensor, shape (batch_size, time_gap, node_feat_dim)
-        nodes_time_gap_neighbor_node_raw_features = self.node_raw_features[torch.from_numpy(time_gap_neighbor_node_ids)]
+        time_gap_indices = torch.as_tensor(
+            time_gap_neighbor_node_ids, dtype=torch.long, device=self.device
+        )
+        nodes_time_gap_neighbor_node_raw_features = self.node_raw_features[
+            time_gap_indices
+        ]
 
         # Tensor, shape (batch_size, time_gap)
-        valid_time_gap_neighbor_node_ids_mask = torch.from_numpy((time_gap_neighbor_node_ids > 0).astype(np.float32))
+        valid_time_gap_neighbor_node_ids_mask = torch.as_tensor(
+            time_gap_neighbor_node_ids > 0,
+            dtype=nodes_time_gap_neighbor_node_raw_features.dtype,
+            device=self.device,
+        )
         # note that if a node has no valid neighbor (whose valid_time_gap_neighbor_node_ids_mask are all zero), directly set the mask to -np.inf will make the
         # scores after softmax be nan. Therefore, we choose a very large negative number (-1e10) instead of -np.inf to tackle this case
         # Tensor, shape (batch_size, time_gap)
         valid_time_gap_neighbor_node_ids_mask[valid_time_gap_neighbor_node_ids_mask == 0] = -1e10
         # Tensor, shape (batch_size, time_gap)
-        scores = torch.softmax(valid_time_gap_neighbor_node_ids_mask, dim=1).to(self.device)
+        scores = torch.softmax(valid_time_gap_neighbor_node_ids_mask, dim=1)
 
         # Tensor, shape (batch_size, node_feat_dim), average over the time_gap neighbors
         nodes_time_gap_neighbor_node_agg_features = torch.mean(nodes_time_gap_neighbor_node_raw_features * scores.unsqueeze(dim=-1), dim=1)
 
         # Tensor, shape (batch_size, node_feat_dim), add features of nodes in node_ids
-        output_node_features = nodes_time_gap_neighbor_node_agg_features + self.node_raw_features[torch.from_numpy(node_ids)]
+        output_node_features = nodes_time_gap_neighbor_node_agg_features + self.node_raw_features[
+            torch.as_tensor(node_ids, dtype=torch.long, device=self.device)
+        ]
 
         # Tensor, shape (batch_size, node_feat_dim)
         node_embeddings = self.output_layer(torch.cat([combined_features, output_node_features], dim=1))

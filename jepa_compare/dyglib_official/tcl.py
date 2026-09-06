@@ -165,14 +165,22 @@ class TCL(nn.Module):
         :return:
         """
         # Tensor, shape (batch_size, num_neighbors + 1, node_feat_dim)
-        nodes_neighbor_node_raw_features = self.node_raw_features[torch.from_numpy(nodes_neighbor_ids)]
+        node_indices = torch.as_tensor(
+            nodes_neighbor_ids, dtype=torch.long, device=self.device
+        )
+        edge_indices = torch.as_tensor(
+            nodes_edge_ids, dtype=torch.long, device=self.device
+        )
+        nodes_neighbor_node_raw_features = self.node_raw_features[node_indices]
         # Tensor, shape (batch_size, num_neighbors + 1, edge_feat_dim)
-        nodes_edge_raw_features = self.edge_raw_features[torch.from_numpy(nodes_edge_ids)]
+        nodes_edge_raw_features = self.edge_raw_features[edge_indices]
         # Tensor, shape (batch_size, num_neighbors + 1, time_feat_dim)
         nodes_neighbor_time_features = time_encoder(timestamps=torch.from_numpy(node_interact_times[:, np.newaxis] - nodes_neighbor_times).float().to(self.device))
         assert nodes_neighbor_ids.shape[1] == self.depth_embedding.weight.shape[0]
         # Tensor, shape (num_neighbors + 1, node_feat_dim)
-        nodes_neighbor_depth_features = self.depth_embedding(torch.tensor(range(nodes_neighbor_ids.shape[1])).to(self.device))
+        nodes_neighbor_depth_features = self.depth_embedding(
+            torch.arange(nodes_neighbor_ids.shape[1], device=self.device)
+        )
 
         return nodes_neighbor_node_raw_features, nodes_edge_raw_features, nodes_neighbor_time_features, nodes_neighbor_depth_features
 

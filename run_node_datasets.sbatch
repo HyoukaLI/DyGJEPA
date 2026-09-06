@@ -1,8 +1,8 @@
 #!/bin/bash
-#SBATCH --job-name=jepa_link_all
+#SBATCH --job-name=jepa_node_all
 #SBATCH --cpus-per-task=4
 #SBATCH --mem-per-cpu=128G
-#SBATCH --gres=gpu:a100_1g.20gb:1
+#SBATCH --gres=gpu:a100:1
 #SBATCH --qos=work
 #SBATCH --time=72:00:00
 #SBATCH --output=logs/%x-%j.out
@@ -35,18 +35,13 @@ import torch
 
 print("torch", torch.__version__, "cuda", torch.cuda.is_available())
 if not torch.cuda.is_available():
-    raise SystemExit("CUDA is required for the link-dataset Slurm job")
+    raise SystemExit("CUDA is required for the node-dataset Slurm job")
 print("cuda_device", torch.cuda.get_device_name(torch.cuda.current_device()))
 PY
 
-COMMAND=(
-  "$PYTHON_BIN" -m jepa_compare.compare_link_prediction
-  --config configs/link_comparison_all.yaml
-)
-# Override at submission time when only a subset is needed, for example:
-# DATASET_NAMES="mooc lastfm" sbatch run_link_datasets.sbatch
+COMMAND=(bash scripts/run_node_datasets.sh)
 if [[ -n "${DATASET_NAMES:-}" ]]; then
   read -r -a DATASETS <<< "$DATASET_NAMES"
-  COMMAND+=(--datasets "${DATASETS[@]}")
+  COMMAND+=("${DATASETS[@]}")
 fi
 "${COMMAND[@]}"

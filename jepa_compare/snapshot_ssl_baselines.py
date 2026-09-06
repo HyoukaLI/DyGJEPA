@@ -27,6 +27,7 @@ from .link_prediction import (
     grouped_ranking_metrics,
     sample_link_queries,
 )
+from .temporal_event_utils import seeded_torch_generator
 
 
 def _bidirected_unique(edge_index: Tensor, num_nodes: int) -> Tensor:
@@ -196,8 +197,10 @@ def _sample_negative_pairs(
 def _subsample_rows(rows: Tensor, count: int, seed: int) -> Tensor:
     if rows.shape[0] <= count:
         return rows
-    generator = torch.Generator().manual_seed(seed)
-    order = torch.randperm(rows.shape[0], generator=generator)[:count]
+    generator, random_device = seeded_torch_generator(rows.device, seed)
+    order = torch.randperm(
+        rows.shape[0], generator=generator, device=random_device
+    )[:count]
     return rows[order.to(rows.device)]
 
 
@@ -585,8 +588,10 @@ class MaskDGNNLinkBaseline(SnapshotSSLLinkBaseline):
         probability = (probability * desired / probability.sum().clamp_min(1e-8)).clamp(
             0, 1
         )
-        generator = torch.Generator().manual_seed(seed)
-        mask = torch.rand(pairs.shape[0], generator=generator).to(pairs.device) < probability
+        generator, random_device = seeded_torch_generator(pairs.device, seed)
+        mask = torch.rand(
+            pairs.shape[0], generator=generator, device=random_device
+        ).to(pairs.device) < probability
         if not mask.any():
             mask[torch.argmax(probability)] = True
         if mask.all():
@@ -742,8 +747,12 @@ class DVGMAELinkBaseline(SnapshotSSLLinkBaseline):
             priority = 1.0 + self.history_balance * (1.0 - history_rate)
             desired = max(1, round(pairs.shape[0] * self.mask_ratio))
             probability = (priority * desired / priority.sum()).clamp(0, 1)
-            generator = torch.Generator().manual_seed(seed + index)
-            mask = torch.rand(pairs.shape[0], generator=generator).to(pairs.device) < probability
+            generator, random_device = seeded_torch_generator(
+                pairs.device, seed + index
+            )
+            mask = torch.rand(
+                pairs.shape[0], generator=generator, device=random_device
+            ).to(pairs.device) < probability
             if not mask.any():
                 mask[torch.argmax(probability)] = True
             if mask.all():

@@ -24,6 +24,14 @@ def choose_device(name: str) -> torch.device:
     return torch.device("cpu")
 
 
+def device_description(device: torch.device) -> str:
+    """Human-readable runtime device for experiment logs."""
+    if device.type == "cuda":
+        index = torch.cuda.current_device() if device.index is None else device.index
+        return f"cuda:{index} ({torch.cuda.get_device_name(index)})"
+    return str(device)
+
+
 def cpu_state_dict(model: torch.nn.Module) -> dict[str, torch.Tensor]:
     return {name: value.detach().cpu().clone() for name, value in model.state_dict().items()}
 
@@ -45,6 +53,7 @@ def run(config: dict) -> dict[str, float]:
     np.random.seed(seed)
     torch.manual_seed(seed)
     device = choose_device(config.get("device", "auto"))
+    print(f"runtime_device={device_description(device)}", flush=True)
     data_cfg = config["data"]
     if data_cfg.get("path"):
         graph = load_npz(data_cfg["path"])

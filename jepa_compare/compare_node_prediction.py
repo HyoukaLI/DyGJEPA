@@ -34,7 +34,7 @@ from .snapshot_ssl_baselines import (
     MaskDGNNLinkBaseline,
     SnapshotSSLLinkBaseline,
 )
-from .train_sg_jepa import choose_device, cpu_state_dict
+from .train_sg_jepa import choose_device, cpu_state_dict, device_description
 
 
 def _deep_update(target: dict, updates: dict) -> dict:
@@ -660,6 +660,7 @@ def run(config: dict) -> dict[str, dict[str, float]]:
     np.random.seed(seed)
     torch.manual_seed(seed)
     device = choose_device(config.get("device", "auto"))
+    print(f"runtime_device={device_description(device)}", flush=True)
     graph = _build_graph(config, seed).to(device)
     if graph.labels is None:
         raise ValueError("node prediction comparison requires node labels")

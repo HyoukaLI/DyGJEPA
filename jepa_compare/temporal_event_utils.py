@@ -28,6 +28,18 @@ class EventStream:
         return int(self.sources.shape[0])
 
 
+def seeded_torch_generator(
+    device: torch.device, seed: int
+) -> tuple[torch.Generator, torch.device]:
+    """Create a deterministic generator on the compute device when supported.
+
+    CUDA random sampling stays on the GPU.  PyTorch does not provide a custom
+    MPS generator, so MPS retains the compatible CPU-generator-and-copy path.
+    """
+    random_device = device if device.type == "cuda" else torch.device("cpu")
+    return torch.Generator(device=random_device).manual_seed(seed), random_device
+
+
 def unique_snapshots(
     windows: Sequence[Sequence[Snapshot]], *, targets_only: bool = False
 ) -> list[Snapshot]:

@@ -111,10 +111,20 @@ class MemoryModel(torch.nn.Module):
         if self.model_name == 'JODIE':
             # compute differences between the time the memory of a node was last updated, and the time for which we want to compute the embedding of a node
             # Tensor, shape (batch_size, )
-            src_node_time_intervals = torch.from_numpy(node_interact_times).float().to(self.device) - updated_node_last_updated_times[torch.from_numpy(src_node_ids)]
+            src_indices = torch.as_tensor(
+                src_node_ids, dtype=torch.long, device=self.device
+            )
+            dst_indices = torch.as_tensor(
+                dst_node_ids, dtype=torch.long, device=self.device
+            )
+            src_node_time_intervals = torch.as_tensor(
+                node_interact_times, dtype=torch.float32, device=self.device
+            ) - updated_node_last_updated_times[src_indices]
             src_node_time_intervals = (src_node_time_intervals - self.src_node_mean_time_shift) / self.src_node_std_time_shift
             # Tensor, shape (batch_size, )
-            dst_node_time_intervals = torch.from_numpy(node_interact_times).float().to(self.device) - updated_node_last_updated_times[torch.from_numpy(dst_node_ids)]
+            dst_node_time_intervals = torch.as_tensor(
+                node_interact_times, dtype=torch.float32, device=self.device
+            ) - updated_node_last_updated_times[dst_indices]
             dst_node_time_intervals = (dst_node_time_intervals - self.dst_node_mean_time_shift_dst) / self.dst_node_std_time_shift
             # Tensor, shape (2 * batch_size, )
             node_time_intervals = torch.cat([src_node_time_intervals, dst_node_time_intervals], dim=0)
@@ -162,8 +172,12 @@ class MemoryModel(torch.nn.Module):
 
         # DyRep does not use embedding module, which instead uses updated_node_memories based on previous raw messages and historical memories
         if self.model_name == 'DyRep':
-            src_node_embeddings = updated_node_memories[torch.from_numpy(src_node_ids)]
-            dst_node_embeddings = updated_node_memories[torch.from_numpy(dst_node_ids)]
+            src_node_embeddings = updated_node_memories[
+                torch.as_tensor(src_node_ids, dtype=torch.long, device=self.device)
+            ]
+            dst_node_embeddings = updated_node_memories[
+                torch.as_tensor(dst_node_ids, dtype=torch.long, device=self.device)
+            ]
 
         return src_node_embeddings, dst_node_embeddings
 
@@ -229,13 +243,19 @@ class MemoryModel(torch.nn.Module):
             dst_node_memories = self.memory_bank.get_memories(node_ids=dst_node_ids)
 
         # Tensor, shape (batch_size, )
-        src_node_delta_times = torch.from_numpy(node_interact_times).float().to(self.device) - \
-                               self.memory_bank.node_last_updated_times[torch.from_numpy(src_node_ids)]
+        src_indices = torch.as_tensor(
+            src_node_ids, dtype=torch.long, device=self.device
+        )
+        src_node_delta_times = torch.as_tensor(
+            node_interact_times, dtype=torch.float32, device=self.device
+        ) - self.memory_bank.node_last_updated_times[src_indices]
         # Tensor, shape (batch_size, time_feat_dim)
         src_node_delta_time_features = self.time_encoder(src_node_delta_times.unsqueeze(dim=1)).reshape(len(src_node_ids), -1)
 
         # Tensor, shape (batch_size, edge_feat_dim)
-        edge_features = self.edge_raw_features[torch.from_numpy(edge_ids)]
+        edge_features = self.edge_raw_features[
+            torch.as_tensor(edge_ids, dtype=torch.long, device=self.device)
+        ]
 
         # Tensor, shape (batch_size, message_dim = memory_dim + memory_dim + time_feat_dim + edge_feat_dim)
         new_src_node_raw_messages = torch.cat([src_node_memories, dst_node_memories, src_node_delta_time_features, edge_features], dim=1)
@@ -337,7 +357,9 @@ class MemoryBank(nn.Module):
         :param node_ids: ndarray, shape (batch_size, )
         :return:
         """
-        return self.node_memories[torch.from_numpy(node_ids)]
+        return self.node_memories[
+            torch.as_tensor(node_ids, dtype=torch.long, device=self.node_memories.device)
+        ]
 
     def set_memories(self, node_ids: np.ndarray, updated_node_memories: torch.Tensor):
         """
@@ -346,7 +368,9 @@ class MemoryBank(nn.Module):
         :param updated_node_memories: Tensor, shape (num_unique_node_ids, memory_dim)
         :return:
         """
-        self.node_memories[torch.from_numpy(node_ids)] = updated_node_memories
+        self.node_memories[
+            torch.as_tensor(node_ids, dtype=torch.long, device=self.node_memories.device)
+        ] = updated_node_memories
 
     def backup_memory_bank(self):
         """
@@ -412,7 +436,13 @@ class MemoryBank(nn.Module):
         :param unique_node_ids: ndarray, (num_unique_node_ids, )
         :return:
         """
-        return self.node_last_updated_times[torch.from_numpy(unique_node_ids)]
+        return self.node_last_updated_times[
+            torch.as_tensor(
+                unique_node_ids,
+                dtype=torch.long,
+                device=self.node_last_updated_times.device,
+            )
+        ]
 
     def extra_repr(self):
         """
@@ -456,7 +486,14 @@ class MemoryUpdater(nn.Module):
         self.memory_bank.set_memories(node_ids=unique_node_ids, updated_node_memories=updated_node_memories)
 
         # update last updated times for nodes in unique_node_ids
-        self.memory_bank.node_last_updated_times[torch.from_numpy(unique_node_ids)] = torch.from_numpy(unique_node_timestamps).float().to(unique_node_messages.device)
+        indices = torch.as_tensor(
+            unique_node_ids, dtype=torch.long, device=unique_node_messages.device
+        )
+        self.memory_bank.node_last_updated_times[indices] = torch.as_tensor(
+            unique_node_timestamps,
+            dtype=torch.float32,
+            device=unique_node_messages.device,
+        )
 
     def get_updated_memories(self, unique_node_ids: np.ndarray, unique_node_messages: torch.Tensor,
                              unique_node_timestamps: np.ndarray):
@@ -477,12 +514,20 @@ class MemoryUpdater(nn.Module):
 
         # Tensor, shape (num_nodes, memory_dim)
         updated_node_memories = self.memory_bank.node_memories.data.clone()
-        updated_node_memories[torch.from_numpy(unique_node_ids)] = self.memory_updater(unique_node_messages,
-                                                                                       updated_node_memories[torch.from_numpy(unique_node_ids)])
+        indices = torch.as_tensor(
+            unique_node_ids, dtype=torch.long, device=unique_node_messages.device
+        )
+        updated_node_memories[indices] = self.memory_updater(
+            unique_node_messages, updated_node_memories[indices]
+        )
 
         # Tensor, shape (num_nodes, )
         updated_node_last_updated_times = self.memory_bank.node_last_updated_times.data.clone()
-        updated_node_last_updated_times[torch.from_numpy(unique_node_ids)] = torch.from_numpy(unique_node_timestamps).float().to(unique_node_messages.device)
+        updated_node_last_updated_times[indices] = torch.as_tensor(
+            unique_node_timestamps,
+            dtype=torch.float32,
+            device=unique_node_messages.device,
+        )
 
         return updated_node_memories, updated_node_last_updated_times
 
@@ -540,7 +585,14 @@ class TimeProjectionEmbedding(nn.Module):
         :return:
         """
         # Tensor, shape (batch_size, memory_dim)
-        source_embeddings = self.dropout(node_memories[torch.from_numpy(node_ids)] * (1 + self.linear_layer(node_time_intervals.unsqueeze(dim=1))))
+        source_embeddings = self.dropout(
+            node_memories[
+                torch.as_tensor(
+                    node_ids, dtype=torch.long, device=node_memories.device
+                )
+            ]
+            * (1 + self.linear_layer(node_time_intervals.unsqueeze(dim=1)))
+        )
 
         return source_embeddings
 
@@ -602,11 +654,20 @@ class GraphAttentionEmbedding(nn.Module):
 
         # query (source) node always has the start time with time interval == 0
         # shape (batch_size, 1, time_feat_dim)
-        node_time_features = self.time_encoder(timestamps=torch.zeros(node_interact_times.shape).unsqueeze(dim=1).to(device))
+        node_time_features = self.time_encoder(
+            timestamps=torch.zeros(
+                (*node_interact_times.shape, 1),
+                dtype=self.node_raw_features.dtype,
+                device=device,
+            )
+        )
         # shape (batch_size, node_feat_dim)
         # add memory and node raw features to get node features
         # note that when using getting values of the ids from Tensor, convert the ndarray to tensor to avoid wrong retrieval
-        node_features = node_memories[torch.from_numpy(node_ids)] + self.node_raw_features[torch.from_numpy(node_ids)]
+        node_indices = torch.as_tensor(
+            node_ids, dtype=torch.long, device=device
+        )
+        node_features = node_memories[node_indices] + self.node_raw_features[node_indices]
 
         if current_layer_num == 0:
             return node_features
@@ -647,7 +708,11 @@ class GraphAttentionEmbedding(nn.Module):
             neighbor_time_features = self.time_encoder(timestamps=torch.from_numpy(neighbor_delta_times).float().to(device))
 
             # get edge features, shape (batch_size, num_neighbors, edge_feat_dim)
-            neighbor_edge_features = self.edge_raw_features[torch.from_numpy(neighbor_edge_ids)]
+            neighbor_edge_features = self.edge_raw_features[
+                torch.as_tensor(
+                    neighbor_edge_ids, dtype=torch.long, device=device
+                )
+            ]
             # temporal graph convolution
             # Tensor, output shape (batch_size, node_feat_dim + time_feat_dim)
             output, _ = self.temporal_conv_layers[current_layer_num - 1](node_features=node_conv_features,

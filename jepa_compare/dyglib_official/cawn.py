@@ -94,7 +94,9 @@ class CAWN(nn.Module):
 
         # get raw features of nodes in the multi-hop graphs
         # Tensor, shape (batch_size, num_neighbors ** self.walk_length, self.walk_length + 1, node_feat_dim)
-        neighbor_raw_features = self.node_raw_features[torch.from_numpy(nodes_neighbor_ids)]
+        neighbor_raw_features = self.node_raw_features[
+            torch.as_tensor(nodes_neighbor_ids, dtype=torch.long, device=self.device)
+        ]
 
         # ndarray, shape (batch_size, num_neighbors ** self.walk_length), record the valid length of each walk
         walks_valid_lengths = (nodes_neighbor_ids != 0).sum(axis=-1)
@@ -114,7 +116,9 @@ class CAWN(nn.Module):
         # check that the edge ids of the target node is denoted by zeros
         assert (nodes_edge_ids[:, :, 0] == 0).all()
         # Tensor, shape (batch_size, num_neighbors ** self.walk_length, self.walk_length + 1, edge_feat_dim)
-        edge_features = self.edge_raw_features[torch.from_numpy(nodes_edge_ids)]
+        edge_features = self.edge_raw_features[
+            torch.as_tensor(nodes_edge_ids, dtype=torch.long, device=self.device)
+        ]
 
         # get position features of nodes in the multi-hop graphs
         # Tensor, shape (batch_size, num_neighbors ** self.walk_length, self.walk_length + 1, position_feat_dim)
@@ -386,7 +390,9 @@ class BiLSTMEncoder(nn.Module):
         encoded_features, seq_lengths = pad_packed_sequence(encoded_features, batch_first=True)
         assert (seq_lengths.numpy() == lengths.flatten()).all()
         # Tensor, shape (batch_size * (num_neighbors ** self.walk_length), ), the shifted sequence lengths
-        shifted_seq_lengths = seq_lengths + torch.tensor([i * encoded_features.shape[1] for i in range(encoded_features.shape[0])])
+        shifted_seq_lengths = seq_lengths.to(encoded_features.device) + torch.arange(
+            encoded_features.shape[0], device=encoded_features.device
+        ) * encoded_features.shape[1]
         # Tensor, shape (batch_size * (num_neighbors ** self.walk_length) * (self.walk_length + 1), self.model_dim)
         encoded_features = encoded_features.reshape(encoded_features.shape[0] * encoded_features.shape[1], encoded_features.shape[2])
         # Tensor, shape (batch_size, num_neighbors ** self.walk_length, self.model_dim), get the encodings of each walk at the last position
