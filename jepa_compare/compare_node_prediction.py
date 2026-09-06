@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from copy import deepcopy
 import json
 import random
 from pathlib import Path
@@ -34,6 +35,71 @@ from .snapshot_ssl_baselines import (
     SnapshotSSLLinkBaseline,
 )
 from .train_sg_jepa import choose_device, cpu_state_dict
+
+
+def _deep_update(target: dict, updates: dict) -> dict:
+    for key, value in updates.items():
+        if isinstance(value, dict) and isinstance(target.get(key), dict):
+            _deep_update(target[key], value)
+        else:
+            target[key] = deepcopy(value)
+    return target
+
+
+def _load_config(path: Path) -> dict:
+    """Load YAML with an optional config-relative ``extends`` base."""
+    with path.open() as handle:
+        config = yaml.safe_load(handle)
+    if not isinstance(config, dict):
+        raise ValueError(f"{path} must contain a YAML mapping")
+    parent = config.pop("extends", None)
+    if parent is None:
+        return config
+    parent_path = Path(parent)
+    if not parent_path.is_absolute():
+        parent_path = path.parent / parent_path
+    return _deep_update(_load_config(parent_path), config)
+
+
+def _dataset_configs(config: dict) -> list[tuple[str, dict]]:
+    entries = config.get("datasets")
+    if not entries:
+        return [(str(config.get("dataset_name", "single")), config)]
+    if not isinstance(entries, list):
+        raise ValueError("datasets must be a list")
+    base = deepcopy(config)
+    base.pop("datasets", None)
+    base.pop("summary_output_path", None)
+    expanded: list[tuple[str, dict]] = []
+    seen: set[str] = set()
+    for raw_entry in entries:
+        if not isinstance(raw_entry, dict) or "name" not in raw_entry:
+            raise ValueError("each dataset entry must be a mapping with a name")
+        entry = deepcopy(raw_entry)
+        name = str(entry.pop("name")).lower()
+        if name == "tsmall":
+            name = "tmall"
+        if name in seen:
+            raise ValueError(f"duplicate dataset entry: {name}")
+        seen.add(name)
+        current = deepcopy(base)
+        current["dataset_name"] = name
+        _deep_update(current, entry)
+        expanded.append((name, current))
+    return expanded
+
+
+def _apply_cli_overrides(config: dict, epochs: int | None, baselines) -> None:
+    if epochs is not None:
+        config["training"]["epochs"] = epochs
+        config["training"]["min_checkpoint_epoch"] = min(
+            int(config["training"].get("min_checkpoint_epoch", 1)), epochs
+        )
+        for settings in config.get("node_baselines", {}).values():
+            if isinstance(settings, dict) and "epochs" in settings:
+                settings["epochs"] = epochs
+    if baselines is not None:
+        config.setdefault("node_baselines", {})["enabled"] = baselines
 
 
 def _require_global_node_order(node_ids: torch.Tensor, num_nodes: int) -> None:
@@ -760,6 +826,12 @@ def main() -> None:
     )
     parser.add_argument("--epochs", type=int, default=None)
     parser.add_argument(
+        "--datasets",
+        nargs="+",
+        default=None,
+        help="run selected entries from a multi-dataset node config",
+    )
+    parser.add_argument(
         "--baselines",
         nargs="*",
         choices=[
@@ -779,19 +851,52 @@ def main() -> None:
         help="override node_baselines.enabled (pass no values to disable all baselines)",
     )
     args = parser.parse_args()
-    with args.config.open() as handle:
-        config = yaml.safe_load(handle)
-    if args.epochs is not None:
-        config["training"]["epochs"] = args.epochs
-        config["training"]["min_checkpoint_epoch"] = min(
-            int(config["training"].get("min_checkpoint_epoch", 1)), args.epochs
+    config = _load_config(args.config)
+    if args.datasets is not None:
+        if not config.get("datasets"):
+            raise ValueError("--datasets requires a multi-dataset node config")
+        requested = {
+            "tmall" if name.lower() == "tsmall" else name.lower()
+            for name in args.datasets
+        }
+        available = {
+            "tmall"
+            if str(entry["name"]).lower() == "tsmall"
+            else str(entry["name"]).lower()
+            for entry in config["datasets"]
+        }
+        unknown = requested - available
+        if unknown:
+            raise ValueError(f"unknown node datasets in config: {sorted(unknown)}")
+        config["datasets"] = [
+            entry
+            for entry in config["datasets"]
+            if (
+                "tmall"
+                if str(entry["name"]).lower() == "tsmall"
+                else str(entry["name"]).lower()
+            )
+            in requested
+        ]
+
+    dataset_results: dict[str, dict] = {}
+    for dataset_name, dataset_config in _dataset_configs(config):
+        _apply_cli_overrides(dataset_config, args.epochs, args.baselines)
+        print(
+            json.dumps(
+                {
+                    "dataset": dataset_name,
+                    "data": dataset_config["data"]["path"],
+                    "output": dataset_config.get("output_path"),
+                }
+            )
         )
-        for settings in config.get("node_baselines", {}).values():
-            if isinstance(settings, dict) and "epochs" in settings:
-                settings["epochs"] = args.epochs
-    if args.baselines is not None:
-        config.setdefault("node_baselines", {})["enabled"] = args.baselines
-    run(config)
+        dataset_results[dataset_name] = run(dataset_config)
+
+    if config.get("datasets") and config.get("summary_output_path"):
+        summary_path = Path(config["summary_output_path"])
+        summary_path.parent.mkdir(parents=True, exist_ok=True)
+        summary_path.write_text(json.dumps(dataset_results, indent=2))
 
 
 if __name__ == "__main__":

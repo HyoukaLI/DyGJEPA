@@ -7,6 +7,8 @@ __pycache__/
 checkpoints/
 runs/
 data/raw/
+data/processed/tmall.npz
+data/processed/patent.npz
 logs/
 results/
 ara-output/

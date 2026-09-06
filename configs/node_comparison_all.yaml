@@ -1,0 +1,27 @@
+# Shared node-classification protocol. All model and probe settings are inherited
+# from the established DBLP comparison; only data paths and dataset-scale batch
+# sizes change. "tsmall" is accepted by the CLI as an alias for official Tmall.
+extends: node_comparison_dblp.yaml
+summary_output_path: results/node_comparison_all.json
+
+datasets:
+  - name: dblp
+    data:
+      path: data/processed/dblp.npz
+    output_path: results/node_comparison_dblp.json
+    training:
+      node_batch_size: 1024
+
+  - name: tmall
+    data:
+      path: data/processed/tmall.npz
+    output_path: results/node_comparison_tmall.json
+    training:
+      node_batch_size: 1024
+
+  - name: patent
+    data:
+      path: data/processed/patent.npz
+    output_path: results/node_comparison_patent.json
+    training:
+      node_batch_size: 2048
