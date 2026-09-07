@@ -10,9 +10,7 @@ import torch.nn.functional as F
 from .data import Snapshot
 from .link_prediction import (
     LinkQueries,
-    binary_average_precision,
-    binary_roc_auc,
-    grouped_ranking_metrics,
+    link_prediction_metrics,
     sample_link_queries,
 )
 
@@ -47,6 +45,9 @@ class JODIELinkBaseline(nn.Module):
         max_positive_pairs: int | None = 512,
         new_edges_only: bool = False,
         undirected: bool = False,
+        negative_destination_candidates: Tensor | None = None,
+        allow_negative_collisions: bool = False,
+        eval_positive_batch_size: int | None = None,
         tbatch_count: int = 500,
         state_change: bool = True,
     ) -> None:
@@ -71,6 +72,9 @@ class JODIELinkBaseline(nn.Module):
         self.max_positive_pairs = max_positive_pairs
         self.new_edges_only = new_edges_only
         self.undirected = undirected
+        self.negative_destination_candidates = negative_destination_candidates
+        self.allow_negative_collisions = allow_negative_collisions
+        self.eval_positive_batch_size = eval_positive_batch_size
         self.tbatch_count = tbatch_count
         self.state_change = state_change
 
@@ -112,6 +116,8 @@ class JODIELinkBaseline(nn.Module):
             new_edges_only=self.new_edges_only,
             undirected=False,
             bipartite_source_count=self.num_users,
+            negative_destination_candidates=self.negative_destination_candidates,
+            allow_negative_collisions=self.allow_negative_collisions,
         )
 
     @staticmethod
@@ -588,14 +594,9 @@ class JODIELinkBaseline(nn.Module):
         probability = torch.cat(probabilities)
         target = torch.cat(labels)
         group_ids = torch.cat(groups)
-        mrr, recall_at_10 = grouped_ranking_metrics(
-            target, probability, group_ids, recall_k=10
+        return link_prediction_metrics(
+            target,
+            probability,
+            group_ids,
+            positive_batch_size=self.eval_positive_batch_size,
         )
-        return {
-            "ap": binary_average_precision(target, probability),
-            "auc": binary_roc_auc(target, probability),
-            "mrr": mrr,
-            "recall_at_10": recall_at_10,
-            "mean_probability": float(probability.mean().item()),
-            "examples": float(target.numel()),
-        }

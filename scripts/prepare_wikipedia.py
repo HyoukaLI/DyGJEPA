@@ -68,7 +68,7 @@ def convert(
     identity_dim: int = 16,
     event_feature_dim: int = 16,
     seed: int = 42,
-    train_ratio: float = 0.75,
+    train_ratio: float = 0.70,
 ) -> None:
     users, items, timestamps, raw_features, state_labels = _read_events(input_path)
     if event_bins < 6 or event_bins > len(users):
@@ -207,7 +207,7 @@ def main() -> None:
     parser.add_argument("--event-bins", type=int, default=50)
     parser.add_argument("--identity-dim", type=int, default=16)
     parser.add_argument("--event-feature-dim", type=int, default=16)
-    parser.add_argument("--train-ratio", type=float, default=0.75)
+    parser.add_argument("--train-ratio", type=float, default=0.70)
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
     convert(

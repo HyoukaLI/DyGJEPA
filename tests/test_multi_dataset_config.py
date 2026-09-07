@@ -13,7 +13,7 @@ from jepa_compare.compare_link_prediction import (
 def test_link_multi_dataset_config_expands_aligned_overrides() -> None:
     path = Path("configs/link_comparison_all.yaml")
     config = yaml.safe_load(path.read_text())
-    assert _seed_values(config) == [42, 44, 46, 48, 50]
+    assert _seed_values(config) == [0, 1, 2, 3, 4]
     expanded = dict(_dataset_configs(config))
 
     assert set(expanded) == {
@@ -21,6 +21,14 @@ def test_link_multi_dataset_config_expands_aligned_overrides() -> None:
         "untrade", "unvote", "uslegis", "enron", "uci",
     }
     assert expanded["wikipedia"]["jodie"]["interaction_feature_dim"] == 172
+    assert expanded["wikipedia"]["rcps_jepa"]["hidden_dim"] == 128
+    assert expanded["wikipedia"]["rcps_jepa"]["id_embedding_dim"] == 128
+    assert expanded["wikipedia"]["rcps_jepa"]["id_embedding_dropout"] == 0.2
+    assert expanded["wikipedia"]["rcps_jepa"]["initial_id_score_scale"] == 0.5
+    assert expanded["wikipedia"]["rcps_jepa"]["train_negative_ratio"] == 4.0
+    assert expanded["wikipedia"]["rcps_jepa"]["rank_loss_weight"] == 1.0
+    assert expanded["wikipedia"]["rcps_training"]["pair_batch_size"] == 500
+    assert expanded["wikipedia"]["rcps_training"]["learning_rate"] == 0.0001
     assert expanded["mooc"]["jodie"]["interaction_feature_dim"] == 4
     assert expanded["lastfm"]["jodie"]["interaction_feature_dim"] == 2
     assert expanded["lastfm"]["jodie"]["state_change"] is False
@@ -47,6 +55,14 @@ def test_link_multi_dataset_config_expands_aligned_overrides() -> None:
     assert expanded["mooc"]["link"] == common_link
     assert expanded["lastfm"]["link"] == common_link
     assert expanded["contacts"]["link"] == common_link
+    assert common_link["negative_ratio"] == 1.0
+    assert common_link["max_positive_pairs"] is None
+    assert common_link["allow_negative_collisions"] is True
+    assert common_link["eval_positive_batch_size"] == 200
+    assert expanded["enron"]["split"] == {
+        "train_ratio": 0.70,
+        "validation_ratio": 0.15,
+    }
 
 
 def test_seed_aggregation_reports_mean_and_population_std() -> None:
@@ -59,3 +75,12 @@ def test_seed_aggregation_reports_mean_and_population_std() -> None:
     assert aggregate["model"]["test"]["ap"]["mean"] == pytest.approx(0.7)
     assert aggregate["model"]["test"]["ap"]["std"] == pytest.approx(0.1)
     assert aggregate["model"]["test"]["best_epoch"]["mean"] == 3.0
+
+
+def test_seed_aggregation_preserves_provenance_strings() -> None:
+    runs = {
+        "0": {"model": {"test": {"ap": 0.6, "protocol": "dyglib"}}},
+        "1": {"model": {"test": {"ap": 0.8, "protocol": "dyglib"}}},
+    }
+    aggregate = _aggregate_seed_runs(runs)
+    assert aggregate["model"]["test"]["protocol"] == "dyglib"

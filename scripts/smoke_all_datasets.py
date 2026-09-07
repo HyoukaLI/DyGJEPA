@@ -97,7 +97,6 @@ def smoke_link_edgebank(config_path: Path, output_dir: Path, max_positive_pairs:
                 "negative_ratio": dataset_config.get("link", {}).get("negative_ratio"),
                 "ap": test.get("ap"),
                 "auc": test.get("auc"),
-                "mrr": test.get("mrr"),
             }
             rows.append(_record(f"link:{name}", True, perf_counter() - started, detail))
         except RuntimeError as exc:
@@ -123,7 +122,6 @@ def smoke_link_edgebank(config_path: Path, output_dir: Path, max_positive_pairs:
                     "negative_ratio": 4.0,
                     "ap": test.get("ap"),
                     "auc": test.get("auc"),
-                    "mrr": test.get("mrr"),
                 }
                 rows.append(_record(f"link:{name}", True, perf_counter() - started, detail))
             except Exception as fallback_exc:

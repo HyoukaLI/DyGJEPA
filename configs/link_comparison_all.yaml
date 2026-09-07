@@ -1,4 +1,4 @@
-seed: [42, 44, 46, 48, 50]
+seed: [0, 1, 2, 3, 4]
 device: auto
 output_dir: results
 summary_output_path: results/link_comparison_all.json
@@ -11,6 +11,35 @@ datasets:
     path: data/processed/wikipedia.npz
     interaction_feature_dim: 172
     state_change: true
+    # Dataset-specific RCPS width/optimization tuning. Baseline settings and
+    # the shared DyGLib data/evaluation protocol remain untouched.
+    overrides:
+      rcps_jepa:
+        hidden_dim: 128
+        rwpe_dim: 4
+        rwpe_walks: 8
+        time_dim: 32
+        predictor_hidden_dim: 256
+        event_dim: 16
+        subgraph_budget: 32
+        history_semantic_dim: 32
+        id_embedding_dim: 128
+        id_embedding_dropout: 0.2
+        initial_id_score_scale: 0.5
+        train_negative_ratio: 4.0
+        node_loss_weight: 0.01
+        relation_loss_weight: 0.01
+        rank_loss_weight: 1.0
+        variance_loss_weight: 0.002
+        covariance_loss_weight: 0.0002
+      rcps_training:
+        epochs: 60
+        pair_batch_size: 500
+        learning_rate: 0.0001
+        lr_patience: 4
+        min_learning_rate: 0.000005
+        weight_decay: 0.00001
+        patience: 12
   - name: mooc
     path: data/processed/mooc.npz
     interaction_feature_dim: 4
@@ -159,9 +188,10 @@ datasets:
       graphmixer: {num_neighbors: 20, dropout: 0.4, sample_neighbor_strategy: recent}
       dygformer: {patch_size: 1, max_input_sequence_length: 32, dropout: 0.1}
 
-# Current shared future-interaction protocol: chronological 75/15/10.
+# DyGLib transductive protocol mapped to the discrete snapshot timeline:
+# chronological 70/15/15 with no event shuffling across split boundaries.
 split:
-  train_ratio: 0.75
+  train_ratio: 0.70
   validation_ratio: 0.15
 
 common_model:
@@ -213,10 +243,14 @@ tgat:
 additional_baselines:
   enabled: [edgebank, dyrep, tgn, cawn, tcl, graphmixer, dygformer]
 
+edgebank:
+  memory_mode: time_window_memory
+  time_window_proportion: 0.15
+
 # Discrete-time self-supervised representation baselines.  All three see only
 # the chronological training snapshots during SSL pretraining; their encoders
 # are then frozen and evaluated with the same PairMLP link probe and the common
-# 1-positive/100-negative candidate groups.
+# DyGLib one-positive/one-random-negative candidate groups.
 snapshot_ssl_baselines:
   enabled: [cldg, maskdgnn, dvgmae]
 
@@ -336,7 +370,7 @@ rcps_jepa:
   subgraph_budget: 32
   path_decay: 0.8
   bridge_weight: 1.0
-  ema_momentum: 0.995
+  ema_momentum: 0.999
   # Duplicate-preserving, full-prefix pair memory.  Each row uses only events
   # from snapshots strictly earlier than the prediction snapshot.
   use_causal_history: true
@@ -345,34 +379,47 @@ rcps_jepa:
   history_semantic_dim: 16
   # Transductive collaborative-filtering residual in the supervised link head.
   # It does not enter the JEPA target branch.
-  id_embedding_dim: 32
-  # Preserve an effective 0.995 epoch decay while updating the teacher after
-  # each online optimizer step (group-preserving batches produce 4620 steps).
-  ema_steps_per_epoch: 4620
+  id_embedding_dim: 64
+  # Keep the EMA update epoch-based because the number of DyGLib-sized
+  # minibatches varies by dataset.
+  ema_steps_per_epoch: null
+  ema_update_per_step: true
+  # Balanced 1:1 DyGLib candidates have prior probability 0.5.
+  initial_link_logit_bias: 0.0
   shuffle_windows: true
   # Use every target-window positive while training; evaluation still follows
   # link.max_positive_pairs so the candidate protocol stays comparable.
   train_max_positive_pairs: null
-  node_loss_weight: 0.05
-  relation_loss_weight: 0.05
-  link_loss_weight: 0.5
-  # Directly optimize the one-positive/hundred-negative candidate ordering.
-  rank_loss_weight: 1.5
-  variance_loss_weight: 0.02
-  covariance_loss_weight: 0.001
+  node_loss_weight: 0.02
+  relation_loss_weight: 0.02
+  link_loss_weight: 1.0
+  # Directly optimize the shared one-positive/one-negative ordering.
+  rank_loss_weight: 1.0
+  variance_loss_weight: 0.005
+  covariance_loss_weight: 0.0005
   variance_target: 0.5
 
 link:
-  # One true destination and one hundred corrupted destinations per ranking group.
-  negative_ratio: 100.0
-  max_positive_pairs: 1024
+  # DyGLib random-negative protocol: one positive and one uniformly corrupted
+  # destination. The candidate support is populated from the complete event
+  # stream by the driver, exactly as NegativeEdgeSampler does.
+  negative_ratio: 1.0
+  max_positive_pairs: null
+  allow_negative_collisions: true
+  # DyGLib averages AP/AUC over batches containing 200 positive events and
+  # their 200 random negatives.
+  eval_positive_batch_size: 200
   new_edges_only: false
   undirected: false
 
 # Shared evaluation/checkpoint cadence only. Optimizer settings are intentionally
 # model-specific; they are not part of the common comparison protocol.
 training:
-  eval_every: 5
+  eval_every: 1
+  patience: 20
+  checkpoint_metrics: [ap, auc]
+  validation_query_seed: 0
+  test_query_seed: 2
 
 # JODIE author-code defaults for interaction prediction.
 jodie_training:
@@ -380,6 +427,7 @@ jodie_training:
   learning_rate: 0.001
   weight_decay: 0.00001
   grad_clip: 1.0
+  patience: 20
 
 # TGAT author-code optimizer defaults.
 tgat_training:
@@ -388,6 +436,7 @@ tgat_training:
   weight_decay: 0.0
   betas: [0.9, 0.999]
   grad_clip: 1.0
+  patience: 20
 
 # DyGLib native optimizer defaults.  The adapter intentionally ignores
 # grad_clip because the official training loop does not clip these gradients.
@@ -397,6 +446,7 @@ tgn_training: &dyglib_training
   weight_decay: 0.0
   betas: [0.9, 0.999]
   grad_clip: 1.0
+  patience: 20
 
 dyrep_training:
   <<: *dyglib_training
@@ -418,10 +468,11 @@ snapshot_ssl_training: &snapshot_ssl_training
   probe_epochs: 50
   probe_learning_rate: 0.001
   probe_weight_decay: 0.00001
-  pair_batch_size: 512
+  # 200 positive groups plus their one-to-one negatives.
+  pair_batch_size: 400
   grad_clip: 1.0
-  eval_every: 5
-  patience: 0
+  eval_every: 1
+  patience: 20
   pretrain_log_every: 10
 
 # CLDG official optimizer defaults are lr=4e-3 and weight_decay=5e-4.
@@ -447,13 +498,17 @@ dvgmae_training:
   pretrain_weight_decay: 0.00001
 
 rcps_training:
-  epochs: 40
-  pair_batch_size: 512
-  learning_rate: 0.00001
-  weight_decay: 0.0001
+  epochs: 100
+  # 200 positive groups plus their one-to-one negatives.
+  pair_batch_size: 400
+  learning_rate: 0.0003
+  lr_reduce_factor: 0.5
+  lr_patience: 5
+  min_learning_rate: 0.00001
+  weight_decay: 0.00001
   grad_clip: 1.0
   eval_every: 1
-  patience: 8
+  patience: 20
   # The causal recurrence prior is a valid parameter-free predictor; retain it
   # as epoch 0 if learned residuals do not improve validation AP.
   evaluate_before_training: true

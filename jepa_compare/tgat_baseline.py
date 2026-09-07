@@ -48,6 +48,9 @@ class TGATLinkBaseline(nn.Module, SharedLinkProtocol):
         max_positive_pairs: int | None = 1024,
         new_edges_only: bool = False,
         undirected: bool = False,
+        negative_destination_candidates: Tensor | None = None,
+        allow_negative_collisions: bool = False,
+        eval_positive_batch_size: int | None = None,
     ) -> None:
         super().__init__()
         del feature_dim
@@ -74,6 +77,9 @@ class TGATLinkBaseline(nn.Module, SharedLinkProtocol):
         self.negative_ratio = negative_ratio
         self.max_positive_pairs = max_positive_pairs
         self.new_edges_only = new_edges_only
+        self.negative_destination_candidates = negative_destination_candidates
+        self.allow_negative_collisions = allow_negative_collisions
+        self.eval_positive_batch_size = eval_positive_batch_size
 
         # The official Wikipedia preprocessing supplies 172-D edge features
         # and zero node features of the same width.  The final row is padding.
@@ -108,8 +114,10 @@ class TGATLinkBaseline(nn.Module, SharedLinkProtocol):
         )
 
         self._train_stream: EventStream | None = None
+        self._full_stream: EventStream | None = None
         self._train_index: TemporalNeighborIndex | None = None
         self._full_index: TemporalNeighborIndex | None = None
+        self._train_destinations: Tensor | None = None
 
     def prepare_streams(
         self,
@@ -129,6 +137,8 @@ class TGATLinkBaseline(nn.Module, SharedLinkProtocol):
             feature_dim=self.dimension,
         )
         self._train_stream = train
+        self._full_stream = full
+        self._train_destinations = torch.unique(train.destinations, sorted=True)
         self._train_index = TemporalNeighborIndex(train, self.num_nodes)
         self._full_index = TemporalNeighborIndex(full, self.num_nodes)
         padding = torch.zeros(
@@ -208,9 +218,18 @@ class TGATLinkBaseline(nn.Module, SharedLinkProtocol):
         generator, random_device = seeded_torch_generator(
             stream.sources.device, seed
         )
-        order = torch.randperm(
-            len(stream), generator=generator, device=random_device
-        ).to(stream.sources.device)
+        dyglib_random = (
+            self.negative_ratio == 1.0
+            and self.max_positive_pairs is None
+            and self.eval_positive_batch_size is not None
+        )
+        order = (
+            torch.arange(len(stream), device=stream.sources.device)
+            if dyglib_random
+            else torch.randperm(
+                len(stream), generator=generator, device=random_device
+            ).to(stream.sources.device)
+        )
         rng = np.random.default_rng(seed)
         total_loss = 0.0
         batches = 0
@@ -221,34 +240,38 @@ class TGATLinkBaseline(nn.Module, SharedLinkProtocol):
             sources = stream.sources[rows]
             positives = stream.destinations[rows]
             times = stream.timestamps[rows]
-            negative_start = 0 if self.num_users is None else self.num_users
-            negatives = torch.randint(
-                negative_start, self.num_nodes, positives.shape,
+            if self._train_destinations is None:
+                raise RuntimeError("TGAT training destination pool is unavailable")
+            pool = self._train_destinations
+            sampled_rows = torch.randint(
+                pool.numel(), positives.shape,
                 generator=generator, device=random_device,
-            ).to(positives.device)
-            collision = negatives == positives
-            if self.num_users is None:
-                collision |= negatives == sources
-            while collision.any():
-                negatives[collision] = torch.randint(
-                    negative_start,
-                    self.num_nodes,
-                    (int(collision.sum()),),
-                    generator=generator,
-                    device=random_device,
-                ).to(positives.device)
+            ).to(pool.device)
+            negatives = pool[sampled_rows]
+            if not self.allow_negative_collisions:
                 collision = negatives == positives
                 if self.num_users is None:
                     collision |= negatives == sources
+                while collision.any():
+                    sampled_rows = torch.randint(
+                        pool.numel(),
+                        (int(collision.sum()),),
+                        generator=generator,
+                        device=random_device,
+                    ).to(pool.device)
+                    negatives[collision] = pool[sampled_rows]
+                    collision = negatives == positives
+                    if self.num_users is None:
+                        collision |= negatives == sources
 
             optimizer.zero_grad(set_to_none=True)
             positive_logits = self._score_pairs(sources, positives, times, index, rng)
             negative_logits = self._score_pairs(sources, negatives, times, index, rng)
-            loss = F.binary_cross_entropy_with_logits(
-                positive_logits, torch.ones_like(positive_logits)
-            ) + F.binary_cross_entropy_with_logits(
-                negative_logits, torch.zeros_like(negative_logits)
+            logits = torch.cat([positive_logits, negative_logits])
+            labels = torch.cat(
+                [torch.ones_like(positive_logits), torch.zeros_like(negative_logits)]
             )
+            loss = F.binary_cross_entropy_with_logits(logits, labels)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(self.parameters(), grad_clip)
             optimizer.step()
@@ -266,6 +289,70 @@ class TGATLinkBaseline(nn.Module, SharedLinkProtocol):
         del history_windows
         if self._full_index is None:
             raise RuntimeError("call prepare_streams before TGAT evaluation")
+        if (
+            self.negative_ratio == 1.0
+            and self.max_positive_pairs is None
+            and self.eval_positive_batch_size is not None
+        ):
+            snapshots = unique_snapshots(windows, targets_only=True)
+            stream = stream_events(
+                snapshots,
+                num_users=self.num_users,
+                num_nodes=self.num_nodes,
+                feature_dim=self.dimension,
+            )
+            negative_pool = self.negative_destination_candidates
+            if negative_pool is None:
+                if self._full_stream is None:
+                    raise RuntimeError("TGAT full event stream is unavailable")
+                negative_pool = torch.unique(
+                    self._full_stream.destinations.detach().cpu(), sorted=True
+                )
+            negative_pool = negative_pool.to(stream.destinations.device)
+            negative_rng, random_device = seeded_torch_generator(
+                stream.destinations.device, query_seed
+            )
+            neighbor_rng = np.random.default_rng(query_seed)
+            probabilities: list[Tensor] = []
+            labels: list[Tensor] = []
+            groups: list[Tensor] = []
+            group_offset = 0
+            batch_size = self.eval_positive_batch_size
+            for start in range(0, len(stream), batch_size):
+                rows = slice(start, start + batch_size)
+                sources = stream.sources[rows]
+                destinations = stream.destinations[rows]
+                times = stream.timestamps[rows]
+                sampled = torch.randint(
+                    negative_pool.numel(),
+                    destinations.shape,
+                    generator=negative_rng,
+                    device=random_device,
+                ).to(negative_pool.device)
+                negatives = negative_pool[sampled]
+                positive_logits = self._score_pairs(
+                    sources, destinations, times, self._full_index, neighbor_rng
+                )
+                negative_logits = self._score_pairs(
+                    sources, negatives, times, self._full_index, neighbor_rng
+                )
+                positive_scores = torch.sigmoid(positive_logits)
+                negative_scores = torch.sigmoid(negative_logits)
+                probabilities.extend([positive_scores, negative_scores])
+                labels.extend(
+                    [torch.ones_like(positive_scores), torch.zeros_like(negative_scores)]
+                )
+                group = torch.arange(
+                    group_offset,
+                    group_offset + sources.numel(),
+                    dtype=torch.long,
+                    device=sources.device,
+                )
+                groups.extend([group, group])
+                group_offset += sources.numel()
+            return self.metrics(
+                torch.cat(labels), torch.cat(probabilities), torch.cat(groups)
+            )
         all_scores: list[Tensor] = []
         all_labels: list[Tensor] = []
         all_groups: list[Tensor] = []

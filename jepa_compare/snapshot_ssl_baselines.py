@@ -21,10 +21,8 @@ import torch.nn.functional as F
 
 from .data import Snapshot
 from .link_prediction import (
-    binary_average_precision,
-    binary_roc_auc,
     canonical_pairs,
-    grouped_ranking_metrics,
+    link_prediction_metrics,
     sample_link_queries,
 )
 from .temporal_event_utils import seeded_torch_generator
@@ -216,6 +214,9 @@ class SnapshotSSLLinkBaseline(nn.Module, ABC):
         new_edges_only: bool,
         undirected: bool,
         bipartite_source_count: int | None = None,
+        negative_destination_candidates: Tensor | None = None,
+        allow_negative_collisions: bool = False,
+        eval_positive_batch_size: int | None = None,
     ) -> None:
         super().__init__()
         self.embedding_dim = int(embedding_dim)
@@ -225,6 +226,9 @@ class SnapshotSSLLinkBaseline(nn.Module, ABC):
         self.new_edges_only = bool(new_edges_only)
         self.undirected = bool(undirected)
         self.bipartite_source_count = bipartite_source_count
+        self.negative_destination_candidates = negative_destination_candidates
+        self.allow_negative_collisions = allow_negative_collisions
+        self.eval_positive_batch_size = eval_positive_batch_size
         self.encoder_frozen = False
 
     @abstractmethod
@@ -264,6 +268,8 @@ class SnapshotSSLLinkBaseline(nn.Module, ABC):
             new_edges_only=self.new_edges_only,
             undirected=self.undirected,
             bipartite_source_count=self.bipartite_source_count,
+            negative_destination_candidates=self.negative_destination_candidates,
+            allow_negative_collisions=self.allow_negative_collisions,
         )
 
     def train_probe_epoch(
@@ -331,17 +337,12 @@ class SnapshotSSLLinkBaseline(nn.Module, ABC):
         probability = torch.cat(probabilities)
         target = torch.cat(labels)
         group_ids = torch.cat(groups)
-        mrr, recall_at_10 = grouped_ranking_metrics(
-            target, probability, group_ids, recall_k=10
+        return link_prediction_metrics(
+            target,
+            probability,
+            group_ids,
+            positive_batch_size=self.eval_positive_batch_size,
         )
-        return {
-            "ap": binary_average_precision(target, probability),
-            "auc": binary_roc_auc(target, probability),
-            "mrr": mrr,
-            "recall_at_10": recall_at_10,
-            "mean_probability": float(probability.mean().item()),
-            "examples": float(target.numel()),
-        }
 
 
 class CLDGLinkBaseline(SnapshotSSLLinkBaseline):

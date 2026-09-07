@@ -1,13 +1,13 @@
-seed: 42
+seed: [0, 1, 2, 3, 4]
 device: auto
 output_path: results/link_comparison_mooc.json
 
 data:
   path: data/processed/mooc.npz
 
-# Current shared future-interaction protocol: chronological 75/15/10.
+# DyGLib chronological transductive split.
 split:
-  train_ratio: 0.75
+  train_ratio: 0.70
   validation_ratio: 0.15
 
 common_model:
@@ -24,7 +24,7 @@ common_model:
 jodie:
   # Original Wikipedia interaction vectors, auxiliary user-state objective,
   # and the paper's 500 time spans.
-  interaction_feature_dim: 4
+  interaction_feature_dim: 172
   tbatch_count: 500
   state_change: true
 
@@ -58,10 +58,14 @@ tgat:
 additional_baselines:
   enabled: [edgebank, dyrep, tgn, cawn, tcl, graphmixer, dygformer]
 
+edgebank:
+  memory_mode: time_window_memory
+  time_window_proportion: 0.15
+
 # Discrete-time self-supervised representation baselines.  All three see only
 # the chronological training snapshots during SSL pretraining; their encoders
 # are then frozen and evaluated with the same PairMLP link probe and the common
-# 1-positive/20-negative candidate groups.
+# DyGLib one-positive/one-random-negative candidate groups.
 snapshot_ssl_baselines:
   enabled: [cldg, maskdgnn, dvgmae]
 
@@ -181,7 +185,7 @@ rcps_jepa:
   subgraph_budget: 32
   path_decay: 0.8
   bridge_weight: 1.0
-  ema_momentum: 0.995
+  ema_momentum: 0.999
   # Duplicate-preserving, full-prefix pair memory.  Each row uses only events
   # from snapshots strictly earlier than the prediction snapshot.
   use_causal_history: true
@@ -190,34 +194,41 @@ rcps_jepa:
   history_semantic_dim: 16
   # Transductive collaborative-filtering residual in the supervised link head.
   # It does not enter the JEPA target branch.
-  id_embedding_dim: 32
-  # Preserve an effective 0.995 epoch decay while updating the teacher after
-  # each online optimizer step (group-preserving batches produce 4620 steps).
-  ema_steps_per_epoch: 4620
+  id_embedding_dim: 64
+  # Use an epoch-based EMA because minibatch counts vary by dataset.
+  ema_steps_per_epoch: null
+  ema_update_per_step: true
+  initial_link_logit_bias: 0.0
   shuffle_windows: true
   # Use every target-window positive while training; evaluation still follows
   # link.max_positive_pairs so the candidate protocol stays comparable.
   train_max_positive_pairs: null
-  node_loss_weight: 0.05
-  relation_loss_weight: 0.05
-  link_loss_weight: 0.5
-  # Directly optimize the one-positive/twenty-negative candidate ordering.
-  rank_loss_weight: 1.5
-  variance_loss_weight: 0.02
-  covariance_loss_weight: 0.001
+  node_loss_weight: 0.02
+  relation_loss_weight: 0.02
+  link_loss_weight: 1.0
+  # Directly optimize the shared one-positive/one-negative ordering.
+  rank_loss_weight: 1.0
+  variance_loss_weight: 0.005
+  covariance_loss_weight: 0.0005
   variance_target: 0.5
 
 link:
-  # One true page and twenty corrupted pages per ranking group.
-  negative_ratio: 20.0
-  max_positive_pairs: 1024
+  # One true destination and one DyGLib random destination per group.
+  negative_ratio: 1.0
+  max_positive_pairs: null
+  allow_negative_collisions: true
+  eval_positive_batch_size: 200
   new_edges_only: false
   undirected: false
 
 # Shared evaluation/checkpoint cadence only. Optimizer settings are intentionally
 # model-specific; they are not part of the common comparison protocol.
 training:
-  eval_every: 5
+  eval_every: 1
+  patience: 20
+  checkpoint_metrics: [ap, auc]
+  validation_query_seed: 0
+  test_query_seed: 2
 
 # JODIE author-code defaults for interaction prediction.
 jodie_training:
@@ -268,10 +279,10 @@ snapshot_ssl_training: &snapshot_ssl_training
   probe_epochs: 50
   probe_learning_rate: 0.001
   probe_weight_decay: 0.00001
-  pair_batch_size: 512
+  pair_batch_size: 400
   grad_clip: 1.0
-  eval_every: 5
-  patience: 0
+  eval_every: 1
+  patience: 20
   pretrain_log_every: 10
 
 # CLDG official optimizer defaults are lr=4e-3 and weight_decay=5e-4.
@@ -297,13 +308,16 @@ dvgmae_training:
   pretrain_weight_decay: 0.00001
 
 rcps_training:
-  epochs: 40
-  pair_batch_size: 512
-  learning_rate: 0.00001
-  weight_decay: 0.0001
+  epochs: 100
+  pair_batch_size: 400
+  learning_rate: 0.0003
+  lr_reduce_factor: 0.5
+  lr_patience: 5
+  min_learning_rate: 0.00001
+  weight_decay: 0.00001
   grad_clip: 1.0
   eval_every: 1
-  patience: 8
+  patience: 20
   # The causal recurrence prior is a valid parameter-free predictor; retain it
   # as epoch 0 if learned residuals do not improve validation AP.
   evaluate_before_training: true

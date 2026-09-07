@@ -15,9 +15,7 @@ from .link_prediction import (
     NODE_EVENT_DIM,
     PAIR_STAT_DIM,
     LinkQueries,
-    binary_average_precision,
-    binary_roc_auc,
-    grouped_ranking_metrics,
+    link_prediction_metrics,
     neighbor_mean_embeddings,
     relation_context_nodes,
     sample_link_queries,
@@ -186,11 +184,15 @@ class RCPSJEPA(nn.Module):
         bridge_weight: float = 1.0,
         ema_momentum: float = 0.99,
         negative_ratio: float = 1.0,
+        train_negative_ratio: float | None = None,
         max_positive_pairs: int | None = 512,
         train_max_positive_pairs: int | None = None,
         new_edges_only: bool = True,
         undirected: bool = True,
         bipartite_source_count: int | None = None,
+        negative_destination_candidates: Tensor | None = None,
+        allow_negative_collisions: bool = False,
+        eval_positive_batch_size: int | None = None,
         node_loss_weight: float = 1.0,
         node_contrastive_loss_weight: float = 0.5,
         contrastive_temperature: float = 0.2,
@@ -205,8 +207,12 @@ class RCPSJEPA(nn.Module):
         use_causal_history: bool = False,
         history_semantic_dim: int = 0,
         id_embedding_dim: int = 0,
+        id_embedding_dropout: float = 0.0,
+        initial_id_score_scale: float = 1.0,
         ema_steps_per_epoch: int | None = None,
+        ema_update_per_step: bool = False,
         shuffle_windows: bool = False,
+        initial_link_logit_bias: float = -3.0,
     ) -> None:
         super().__init__()
         if window_size < 2:
@@ -215,10 +221,16 @@ class RCPSJEPA(nn.Module):
             raise ValueError("ema_momentum must be in [0, 1)")
         if event_dim < 1:
             raise ValueError("event_dim must be positive")
+        if negative_ratio <= 0 or (
+            train_negative_ratio is not None and train_negative_ratio <= 0
+        ):
+            raise ValueError("negative ratios must be positive")
         if ema_steps_per_epoch is not None and ema_steps_per_epoch < 1:
             raise ValueError("ema_steps_per_epoch must be positive")
         if history_semantic_dim < 0 or id_embedding_dim < 0:
             raise ValueError("history/id embedding dimensions must be non-negative")
+        if not 0.0 <= id_embedding_dropout < 1.0:
+            raise ValueError("id_embedding_dropout must be in [0, 1)")
         if id_embedding_dim and num_nodes is None:
             raise ValueError("num_nodes is required when id_embedding_dim is positive")
         self.hidden_dim = hidden_dim
@@ -231,6 +243,11 @@ class RCPSJEPA(nn.Module):
         self.bridge_weight = bridge_weight
         self.ema_momentum = ema_momentum
         self.negative_ratio = negative_ratio
+        self.train_negative_ratio = (
+            negative_ratio
+            if train_negative_ratio is None
+            else float(train_negative_ratio)
+        )
         self.max_positive_pairs = max_positive_pairs
         # None keeps every target-window positive during training; evaluation
         # still uses ``max_positive_pairs`` so the reported candidate protocol
@@ -239,6 +256,9 @@ class RCPSJEPA(nn.Module):
         self.new_edges_only = new_edges_only
         self.undirected = undirected
         self.bipartite_source_count = bipartite_source_count
+        self.negative_destination_candidates = negative_destination_candidates
+        self.allow_negative_collisions = allow_negative_collisions
+        self.eval_positive_batch_size = eval_positive_batch_size
         self.signature_depth = signature_depth
         self.node_loss_weight = node_loss_weight
         self.node_contrastive_loss_weight = node_contrastive_loss_weight
@@ -253,10 +273,12 @@ class RCPSJEPA(nn.Module):
         self.cache_rwpe = cache_rwpe
         self.use_causal_history = use_causal_history
         self.history_semantic_dim = history_semantic_dim
+        self.id_embedding_dropout = float(id_embedding_dropout)
         self.history_feature_dim = (
             RELATION_HISTORY_STAT_DIM + 3 * history_semantic_dim
         )
         self.ema_steps_per_epoch = ema_steps_per_epoch
+        self.ema_update_per_step = bool(ema_update_per_step)
         self.shuffle_windows = shuffle_windows
         self._rwpe_cache: dict[tuple[int, int, str], Tensor] = {}
         self._history_time_to_row: dict[int, int] = {}
@@ -268,6 +290,14 @@ class RCPSJEPA(nn.Module):
         self._history_node_counts: Tensor | None = None
         self._history_pair_semantics: Tensor | None = None
         self._history_node_semantics: Tensor | None = None
+        # Compact lexicographic indexes for event-exact causal counts. They let
+        # the discrete snapshot encoder retain its interface while the link
+        # head sees interactions strictly before each query timestamp,
+        # including earlier events from the same snapshot.
+        self._exact_event_times: Tensor | None = None
+        self._exact_pair_codes: Tensor | None = None
+        self._exact_node_codes: Tensor | None = None
+        self._exact_event_stride: int | None = None
 
         encoder_dim = feature_dim + rwpe_dim + time_dim
         self.feature_skip = nn.Linear(feature_dim, hidden_dim, bias=False)
@@ -366,22 +396,36 @@ class RCPSJEPA(nn.Module):
             nn.GELU(),
             nn.Linear(predictor_hidden_dim, 1),
         )
-        # Start from the strong causal recurrence prior; the neural head learns
-        # a residual for unseen and historically inactive pairs.  A -3 bias
-        # initializes unseen-pair probability near the 1/21 candidate prior.
+        # Start from a causal recurrence prior; the neural head learns a
+        # residual for unseen and historically inactive pairs.
         nn.init.zeros_(self.intensity_head[-1].weight)
-        nn.init.constant_(self.intensity_head[-1].bias, -3.0)
-        self.history_prior_scale = nn.Parameter(torch.tensor(0.54132485))
-        self.node_id_embedding = (
+        nn.init.constant_(self.intensity_head[-1].bias, initial_link_logit_bias)
+        # Directed, feature-wise recurrence prior over the eight causal history
+        # statistics. Unlike a single scale, this can distinguish frequency,
+        # recency, burstiness and endpoint popularity without changing the JEPA
+        # representation pathway.
+        self.history_prior_weights = nn.Parameter(
+            torch.tensor([0.80, 0.45, 1.25, 0.20, 0.0, 0.12, 0.45, 0.45])
+        )
+        self.source_id_embedding = (
             nn.Embedding(int(num_nodes), id_embedding_dim)
             if id_embedding_dim > 0
             else None
         )
-        if self.node_id_embedding is not None:
-            nn.init.normal_(self.node_id_embedding.weight, std=0.02)
-        # Zero initialization keeps the deterministic history prior unchanged
-        # at epoch 0; supervised training can activate collaborative filtering.
-        self.id_score_scale = nn.Parameter(torch.tensor(0.0))
+        self.destination_id_embedding = (
+            nn.Embedding(int(num_nodes), id_embedding_dim)
+            if id_embedding_dim > 0
+            else None
+        )
+        if self.source_id_embedding is not None:
+            assert self.destination_id_embedding is not None
+            nn.init.normal_(self.source_id_embedding.weight, std=0.02)
+            nn.init.normal_(self.destination_id_embedding.weight, std=0.02)
+        # A nonzero scale lets the directed transductive embeddings receive a
+        # learning signal from the first optimizer step.
+        self.id_score_scale = nn.Parameter(
+            torch.tensor(float(initial_id_score_scale))
+        )
         # Downstream residual on top of frozen multi-hop homophily. Zero-init keeps
         # the starting point at hop5 (~paper SG level) while allowing temporal
         # JEPA features to add a supervised or SSL-driven correction.
@@ -548,6 +592,50 @@ class RCPSJEPA(nn.Module):
             torch.stack(node_semantic_rows) if node_semantic_rows else None
         )
 
+        event_sources: list[Tensor] = []
+        event_destinations: list[Tensor] = []
+        event_times: list[Tensor] = []
+        for snapshot in snapshots:
+            edges = snapshot.query_edge_index
+            if edges is None or not edges.numel():
+                continue
+            event_sources.append(edges[0].long())
+            event_destinations.append(edges[1].long())
+            if snapshot.query_timestamps is None:
+                event_times.append(
+                    torch.full(
+                        (edges.shape[1],),
+                        float(snapshot.time),
+                        dtype=snapshot.x.dtype,
+                        device=device,
+                    )
+                )
+            else:
+                event_times.append(
+                    snapshot.query_timestamps.to(device=device, dtype=snapshot.x.dtype)
+                )
+        sources = torch.cat(event_sources)
+        destinations = torch.cat(event_destinations)
+        times = torch.cat(event_times)
+        chronological = torch.argsort(times, stable=True)
+        times = times[chronological]
+        sources = sources[chronological]
+        destinations = destinations[chronological]
+        event_count = int(times.numel())
+        stride = event_count + 1
+        event_rank = torch.arange(event_count, dtype=torch.long, device=device)
+        pair_keys_exact = sources * num_nodes + destinations
+        self._exact_event_times = times
+        self._exact_pair_codes = torch.sort(
+            pair_keys_exact * stride + event_rank
+        ).values
+        node_ids_exact = torch.cat([sources, destinations])
+        node_ranks_exact = torch.cat([event_rank, event_rank])
+        self._exact_node_codes = torch.sort(
+            node_ids_exact * stride + node_ranks_exact
+        ).values
+        self._exact_event_stride = stride
+
     def _causal_history_features(
         self,
         target: Snapshot,
@@ -591,11 +679,51 @@ class RCPSJEPA(nn.Module):
         assert node_counts is not None
         source_count = node_counts[row, pairs[:, 0]]
         destination_count = node_counts[row, pairs[:, 1]]
-        del timestamps
         query_time = torch.full_like(count, float(target.time))
+        if timestamps is not None and self._exact_event_times is not None:
+            pair_codes = self._exact_pair_codes
+            node_codes = self._exact_node_codes
+            stride = self._exact_event_stride
+            if pair_codes is None or node_codes is None or stride is None:
+                raise RuntimeError("event-exact causal history index is incomplete")
+            event_times = self._exact_event_times
+            query_timestamps = timestamps.to(
+                device=pairs.device, dtype=event_times.dtype
+            )
+            query_rank = torch.searchsorted(
+                event_times, query_timestamps, right=False
+            ).long()
+            query_time = query_rank.to(count.dtype)
+
+            pair_base = keys * stride
+            pair_start = torch.searchsorted(pair_codes, pair_base, right=False)
+            pair_end = torch.searchsorted(
+                pair_codes, pair_base + query_rank, right=False
+            )
+            count = (pair_end - pair_start).to(count.dtype)
+            has_pair_history = pair_end > pair_start
+            previous_code_position = (pair_end - 1).clamp_min(0)
+            previous_event_rank = (
+                pair_codes[previous_code_position] % stride
+            ).long()
+            exact_last_time = previous_event_rank.to(count.dtype)
+            last_time = torch.where(
+                has_pair_history, exact_last_time, torch.full_like(query_time, -1.0)
+            )
+
+            def exact_node_count(node_ids: Tensor) -> Tensor:
+                node_base = node_ids.long() * stride
+                node_start = torch.searchsorted(node_codes, node_base, right=False)
+                node_end = torch.searchsorted(
+                    node_codes, node_base + query_rank, right=False
+                )
+                return (node_end - node_start).to(count.dtype)
+
+            source_count = exact_node_count(pairs[:, 0])
+            destination_count = exact_node_count(pairs[:, 1])
         inverse_recency = torch.where(
             count > 0,
-            1.0 / (1.0 + (query_time - last_time).clamp_min(0.0)),
+            1.0 / (1.0 + torch.log1p((query_time - last_time).clamp_min(0.0))),
             torch.zeros_like(count),
         )
         statistics = torch.stack(
@@ -772,15 +900,25 @@ class RCPSJEPA(nn.Module):
         intensity_input = torch.cat(
             [relation_context, history_context, context], dim=-1
         )
-        history_prior = history_features[:, 0] + history_features[:, 2]
+        history_prior = (
+            history_features[:, :8]
+            * self.history_prior_weights.to(history_features.dtype)
+        ).sum(dim=-1)
         logit = self.intensity_head(intensity_input).squeeze(-1)
-        logit = logit + F.softplus(self.history_prior_scale) * history_prior
-        if self.node_id_embedding is not None:
+        logit = logit + history_prior
+        if self.source_id_embedding is not None:
+            assert self.destination_id_embedding is not None
             source_id = F.normalize(
-                self.node_id_embedding(pairs[:, 0]), dim=-1
+                self.source_id_embedding(pairs[:, 0]), dim=-1
             )
             destination_id = F.normalize(
-                self.node_id_embedding(pairs[:, 1]), dim=-1
+                self.destination_id_embedding(pairs[:, 1]), dim=-1
+            )
+            source_id = F.dropout(
+                source_id, p=self.id_embedding_dropout, training=self.training
+            )
+            destination_id = F.dropout(
+                destination_id, p=self.id_embedding_dropout, training=self.training
             )
             id_score = (source_id * destination_id).sum(dim=-1)
             logit = logit + self.id_score_scale * id_score
@@ -814,18 +952,25 @@ class RCPSJEPA(nn.Module):
         window: Sequence[Snapshot],
         seed: int,
         max_positive: int | None | object = _QUERY_CAP_UNSET,
+        negative_ratio: float | None = None,
     ) -> LinkQueries:
         if max_positive is _QUERY_CAP_UNSET:
             max_positive = self.max_positive_pairs
         return sample_link_queries(
             window[-1],
             window[-2],
-            negative_ratio=self.negative_ratio,
+            negative_ratio=(
+                self.negative_ratio
+                if negative_ratio is None
+                else float(negative_ratio)
+            ),
             max_positive=None if max_positive is None else int(max_positive),
             seed=seed,
             new_edges_only=self.new_edges_only,
             undirected=self.undirected,
             bipartite_source_count=self.bipartite_source_count,
+            negative_destination_candidates=self.negative_destination_candidates,
+            allow_negative_collisions=self.allow_negative_collisions,
         )
 
     def _node_predictions(
@@ -1097,9 +1242,11 @@ class RCPSJEPA(nn.Module):
         per_sample = F.binary_cross_entropy(
             output.probability.clamp(1e-6, 1 - 1e-6), labels, reduction="none"
         )
+        positive_count = positive.sum().clamp_min(1)
+        batch_negative_ratio = (~positive).sum().to(per_sample.dtype) / positive_count
         sample_weight = torch.where(
             positive,
-            per_sample.new_tensor(float(self.negative_ratio)),
+            batch_negative_ratio,
             per_sample.new_tensor(1.0),
         )
         link_loss = (per_sample * sample_weight).mean()
@@ -1163,6 +1310,7 @@ class RCPSJEPA(nn.Module):
                 window,
                 seed + window_index,
                 max_positive=self.train_max_positive_pairs,
+                negative_ratio=self.train_negative_ratio,
             )
             for rows in _query_group_batches(queries, pair_batch_size):
                 optimizer.zero_grad(set_to_none=True)
@@ -1184,7 +1332,10 @@ class RCPSJEPA(nn.Module):
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(self.parameters(), float(grad_clip))
                 optimizer.step()
-                if self.ema_steps_per_epoch is not None:
+                if self.ema_update_per_step:
+                    momentum = self.ema_momentum
+                    self.update_target_encoder(momentum=momentum)
+                elif self.ema_steps_per_epoch is not None:
                     momentum = self.ema_momentum ** (1.0 / self.ema_steps_per_epoch)
                     self.update_target_encoder(momentum=momentum)
                 steps += 1
@@ -1197,6 +1348,14 @@ class RCPSJEPA(nn.Module):
             raise ValueError("no temporal pair batches were produced")
         metrics = {name: value / steps for name, value in metric_sums.items()}
         metrics["steps"] = float(steps)
+        metrics["history_count_weight"] = float(
+            self.history_prior_weights[0].detach().item()
+        )
+        metrics["history_recency_weight"] = float(
+            self.history_prior_weights[2].detach().item()
+        )
+        metrics["id_score_scale"] = float(self.id_score_scale.detach().item())
+        metrics["train_negative_ratio"] = float(self.train_negative_ratio)
         return metrics
 
     def loss_windows(
@@ -1216,7 +1375,11 @@ class RCPSJEPA(nn.Module):
         total_batches = 0
         if backward:
             for window_index, window in enumerate(windows):
-                queries = self.sample_queries(window, query_seed + window_index)
+                queries = self.sample_queries(
+                    window,
+                    query_seed + window_index,
+                    negative_ratio=self.train_negative_ratio,
+                )
                 total_batches += len(_query_group_batches(queries, pair_batch_size))
 
         metric_sums = {
@@ -1231,7 +1394,11 @@ class RCPSJEPA(nn.Module):
         detached_losses: list[float] = []
         batch_entries: list[tuple[Tensor, dict[str, Tensor]]] = []
         for window_index, window in enumerate(windows):
-            queries = self.sample_queries(window, query_seed + window_index)
+            queries = self.sample_queries(
+                window,
+                query_seed + window_index,
+                negative_ratio=self.train_negative_ratio,
+            )
             prepared = self.prepare_window(window)
             query_batches = _query_group_batches(queries, pair_batch_size)
             for batch_index, rows in enumerate(query_batches):
@@ -1317,14 +1484,9 @@ class RCPSJEPA(nn.Module):
         probability = torch.cat(probabilities)
         target = torch.cat(labels)
         group_ids = torch.cat(groups)
-        mrr, recall_at_10 = grouped_ranking_metrics(
-            target, probability, group_ids, recall_k=10
+        return link_prediction_metrics(
+            target,
+            probability,
+            group_ids,
+            positive_batch_size=self.eval_positive_batch_size,
         )
-        return {
-            "ap": binary_average_precision(target, probability),
-            "auc": binary_roc_auc(target, probability),
-            "mrr": mrr,
-            "recall_at_10": recall_at_10,
-            "mean_probability": float(probability.mean().item()),
-            "examples": float(target.numel()),
-        }

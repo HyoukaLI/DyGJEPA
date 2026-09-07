@@ -46,6 +46,57 @@ def _build_graph(config: dict, seed: int):
     return graph
 
 
+def _negative_destination_pool(graph) -> torch.Tensor:
+    """Return DyGLib's full-stream destination sampling support."""
+    destinations = [
+        snapshot.query_edge_index[1].detach().cpu()
+        for snapshot in graph.snapshots
+        if snapshot.query_edge_index is not None
+        and snapshot.query_edge_index.shape[1] > 0
+    ]
+    if not destinations:
+        raise ValueError("DyGLib link protocol requires query_edge_index events")
+    return torch.unique(torch.cat(destinations), sorted=True)
+
+
+def _target_event_count(windows: list[list]) -> int | None:
+    """Count raw target events, or return None for structural-only snapshots."""
+    targets = unique_snapshots(windows, targets_only=True)
+    if any(snapshot.query_edge_index is None for snapshot in targets):
+        return None
+    return sum(int(snapshot.query_edge_index.shape[1]) for snapshot in targets)
+
+
+def _assert_full_event_coverage(
+    result: dict[str, dict[str, dict[str, float]]],
+    split: TemporalWindowSplit,
+    link_cfg: dict,
+) -> None:
+    """Fail fast when a model silently drops events under the shared protocol."""
+    if (
+        float(link_cfg.get("negative_ratio", 1.0)) != 1.0
+        or link_cfg.get("max_positive_pairs") is not None
+        or bool(link_cfg.get("new_edges_only", False))
+    ):
+        return
+    expected = {
+        "validation": _target_event_count(split.validation),
+        "test": _target_event_count(split.test),
+    }
+    for model_name, model_result in result.items():
+        for split_name, event_count in expected.items():
+            if event_count is None or split_name not in model_result:
+                continue
+            expected_examples = float(2 * event_count)
+            actual_examples = float(model_result[split_name]["examples"])
+            if actual_examples != expected_examples:
+                raise RuntimeError(
+                    f"{model_name} evaluated {actual_examples:g} {split_name} "
+                    f"examples; shared 1:1 protocol requires "
+                    f"{expected_examples:g} from all raw target events"
+                )
+
+
 def _train_one(
     name: str,
     model: nn.Module,
@@ -75,14 +126,28 @@ def _train_one(
             eps=1e-10,
         )
     )
+    scheduler = None
+    if "lr_reduce_factor" in training:
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer,
+            mode="max",
+            factor=float(training["lr_reduce_factor"]),
+            patience=int(training.get("lr_patience", 5)),
+            min_lr=float(training.get("min_learning_rate", 0.0)),
+        )
     epochs = int(training["epochs"])
     pair_batch_size = training.get("pair_batch_size")
     eval_every = int(training.get("eval_every", 1))
-    best_ap = float("-inf")
+    checkpoint_metrics = tuple(training.get("checkpoint_metrics", ("ap",)))
+    if not checkpoint_metrics:
+        raise ValueError("checkpoint_metrics must not be empty")
+    best_metrics = {metric: float("-inf") for metric in checkpoint_metrics}
     best_epoch = 0
     best_state: dict[str, torch.Tensor] | None = None
     patience = int(training.get("patience", 0))
     evaluations_without_improvement = 0
+    validation_query_seed = int(training.get("validation_query_seed", 0))
+    test_query_seed = int(training.get("test_query_seed", 2))
 
     def evaluate(
         windows: list[list], history_windows: list[list], query_seed: int
@@ -99,9 +164,9 @@ def _train_one(
 
     if bool(training.get("evaluate_before_training", False)):
         model.eval()
-        validation = evaluate(split.validation, split.train, seed + 1_000_000)
+        validation = evaluate(split.validation, split.train, validation_query_seed)
         print(json.dumps({"model": name, "epoch": 0, "validation": validation}))
-        best_ap = validation["ap"]
+        best_metrics = {metric: validation[metric] for metric in checkpoint_metrics}
         best_epoch = 0
         best_state = cpu_state_dict(model)
 
@@ -157,18 +222,28 @@ def _train_one(
             raise RuntimeError(f"{name} produced a non-finite loss at epoch {epoch}")
         if hasattr(model, "update_target_encoder") and not (
             isinstance(model, RCPSJEPA)
-            and model.ema_steps_per_epoch is not None
+            and (
+                model.ema_update_per_step
+                or model.ema_steps_per_epoch is not None
+            )
         ):
             model.update_target_encoder()
 
         if epoch == 1 or epoch % eval_every == 0 or epoch == epochs:
             model.eval()
             validation = evaluate(
-                split.validation, split.train, seed + 1_000_000
+                split.validation, split.train, validation_query_seed
             )
+            if scheduler is not None:
+                scheduler.step(validation["ap"])
             print(json.dumps({"model": name, "epoch": epoch, "train": metrics, "validation": validation}))
-            if validation["ap"] > best_ap:
-                best_ap = validation["ap"]
+            if all(
+                validation[metric] >= best_metrics[metric]
+                for metric in checkpoint_metrics
+            ):
+                best_metrics = {
+                    metric: validation[metric] for metric in checkpoint_metrics
+                }
                 best_epoch = epoch
                 best_state = cpu_state_dict(model)
                 evaluations_without_improvement = 0
@@ -182,12 +257,12 @@ def _train_one(
     model.load_state_dict(best_state)
     model.eval()
     validation = evaluate(
-        split.validation, split.train, seed + 1_000_000
+        split.validation, split.train, validation_query_seed
     )
     test = evaluate(
         split.test,
         [*split.train, *split.validation],
-        seed + 2_000_000,
+        test_query_seed,
     )
     test["best_epoch"] = float(best_epoch)
     return validation, test
@@ -233,8 +308,13 @@ def _train_snapshot_ssl_one(
     eval_every = int(training.get("eval_every", 1))
     pair_batch_size = int(training.get("pair_batch_size", 512))
     patience = int(training.get("patience", 0))
+    validation_query_seed = int(training.get("validation_query_seed", 0))
+    test_query_seed = int(training.get("test_query_seed", 2))
     stale_evaluations = 0
-    best_ap = float("-inf")
+    checkpoint_metrics = tuple(training.get("checkpoint_metrics", ("ap",)))
+    if not checkpoint_metrics:
+        raise ValueError("checkpoint_metrics must not be empty")
+    best_metrics = {metric: float("-inf") for metric in checkpoint_metrics}
     best_epoch = 0
     best_probe_state: dict[str, torch.Tensor] | None = None
     for epoch in range(1, probe_epochs + 1):
@@ -249,11 +329,16 @@ def _train_snapshot_ssl_one(
             validation = model.evaluate_windows(
                 split.validation,
                 pair_batch_size=pair_batch_size,
-                query_seed=seed + 1_000_000,
+                query_seed=validation_query_seed,
             )
             print(json.dumps({"model": name, "stage": "frozen_link_probe", "epoch": epoch, "train": metrics, "validation": validation}))
-            if validation["ap"] > best_ap:
-                best_ap = validation["ap"]
+            if all(
+                validation[metric] >= best_metrics[metric]
+                for metric in checkpoint_metrics
+            ):
+                best_metrics = {
+                    metric: validation[metric] for metric in checkpoint_metrics
+                }
                 best_epoch = epoch
                 best_probe_state = cpu_state_dict(model.probe)
                 stale_evaluations = 0
@@ -268,12 +353,12 @@ def _train_snapshot_ssl_one(
     validation = model.evaluate_windows(
         split.validation,
         pair_batch_size=pair_batch_size,
-        query_seed=seed + 1_000_000,
+        query_seed=validation_query_seed,
     )
     test: dict[str, float | str] = model.evaluate_windows(
         split.test,
         pair_batch_size=pair_batch_size,
-        query_seed=seed + 2_000_000,
+        query_seed=test_query_seed,
     )
     test.update(
         {
@@ -336,6 +421,7 @@ def run(config: dict) -> dict[str, dict[str, dict[str, float]]]:
         float(split_cfg.get("validation_ratio", 0.2)),
     )
     link_cfg = dict(config.get("link", {}))
+    link_cfg["negative_destination_candidates"] = _negative_destination_pool(graph)
     configured = link_cfg.get("bipartite_source_count")
     if configured is not None and (
         graph.num_source_nodes is None
@@ -423,16 +509,19 @@ def run(config: dict) -> dict[str, dict[str, dict[str, float]]]:
     if "edgebank" in enabled_additional:
         edge_bank = EdgeBankLinkBaseline(
             num_nodes=graph.num_nodes,
+            **dict(config.get("edgebank", {})),
             **link_cfg,
         ).to(device)
         edge_bank.eval()
         edge_validation = edge_bank.evaluate_protocol(
-            split.validation, split.train, query_seed=seed + 1_000_000
+            split.validation,
+            split.train,
+            query_seed=int(shared_training.get("validation_query_seed", 0)),
         )
         edge_test = edge_bank.evaluate_protocol(
             split.test,
             [*split.train, *split.validation],
-            query_seed=seed + 2_000_000,
+            query_seed=int(shared_training.get("test_query_seed", 2)),
         )
         edge_test["best_epoch"] = 0.0
         result["edgebank"] = {
@@ -520,6 +609,8 @@ def run(config: dict) -> dict[str, dict[str, dict[str, float]]]:
         del rcps_model
         release_device_memory(device)
 
+    _assert_full_event_coverage(result, split, link_cfg)
+
     output_path = config.get("output_path")
     if output_path:
         path = Path(output_path)
@@ -577,17 +668,24 @@ def _aggregate_seed_runs(runs: dict[str, dict]) -> dict:
                 raise ValueError("all seed runs must contain the same metrics")
             aggregate[model_name][split_name] = {}
             for metric_name in sorted(metric_names):
-                values = np.asarray(
-                    [
-                        float(result[model_name][split_name][metric_name])
-                        for result in run_results
-                    ],
-                    dtype=np.float64,
-                )
-                aggregate[model_name][split_name][metric_name] = {
-                    "mean": float(values.mean()),
-                    "std": float(values.std(ddof=0)),
-                }
+                raw_values = [
+                    result[model_name][split_name][metric_name]
+                    for result in run_results
+                ]
+                if all(
+                    isinstance(value, (int, float, np.integer, np.floating))
+                    and not isinstance(value, bool)
+                    for value in raw_values
+                ):
+                    values = np.asarray(raw_values, dtype=np.float64)
+                    aggregate[model_name][split_name][metric_name] = {
+                        "mean": float(values.mean()),
+                        "std": float(values.std(ddof=0)),
+                    }
+                elif all(value == raw_values[0] for value in raw_values[1:]):
+                    aggregate[model_name][split_name][metric_name] = raw_values[0]
+                else:
+                    aggregate[model_name][split_name][metric_name] = raw_values
     return aggregate
 
 

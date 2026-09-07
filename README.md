@@ -77,11 +77,21 @@ Run all configured datasets sequentially:
 bash scripts/run_link_datasets.sh
 ```
 
-The unified configuration runs seeds `42, 44, 46, 48, 50`. Each model is
-reinitialized independently for every seed. To override the seed list:
+The unified link configuration follows the DyGLib transductive protocol:
+chronological `70/15/15`, one random destination negative per positive,
+batch size 200 positive events, every recorded validation/test event (including
+self-interactions when present in the raw stream), fixed
+validation/test negative seeds `0/2`, and model seeds `0, 1, 2, 3, 4`.
+AP and AUC are averaged over evaluation batches as in DyGLib. MRR and
+Recall@10 are intentionally not computed by this DyGLib-aligned comparison.
+RCPS-JEPA may use multiple random destinations per positive during training as
+a model-specific hyperparameter; validation and test always retain the shared
+one-positive/one-negative protocol.
+
+Each model is reinitialized independently for every seed. To override the seed list:
 
 ```bash
-SEEDS="42 44" bash scripts/run_link_datasets.sh wikipedia
+SEEDS="0 1" bash scripts/run_link_datasets.sh wikipedia
 ```
 
 Run only selected datasets with the same configuration and protocol:

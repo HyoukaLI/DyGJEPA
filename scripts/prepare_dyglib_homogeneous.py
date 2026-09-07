@@ -82,7 +82,7 @@ def convert(
     event_bins: int = 50,
     identity_dim: int = 16,
     event_feature_dim: int = 16,
-    train_ratio: float = 0.75,
+    train_ratio: float = 0.70,
     seed: int = 42,
 ) -> None:
     csv_path, edge_feature_path, node_feature_path = _resolve_files(dataset_dir)
@@ -209,7 +209,7 @@ def main() -> None:
     parser.add_argument("--event-bins", type=int, default=50)
     parser.add_argument("--identity-dim", type=int, default=16)
     parser.add_argument("--event-feature-dim", type=int, default=16)
-    parser.add_argument("--train-ratio", type=float, default=0.75)
+    parser.add_argument("--train-ratio", type=float, default=0.70)
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
     convert(

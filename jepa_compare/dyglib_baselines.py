@@ -161,6 +161,9 @@ class DyGLibLinkBaseline(nn.Module, SharedLinkProtocol):
         max_positive_pairs: int | None = 1024,
         new_edges_only: bool = False,
         undirected: bool = False,
+        negative_destination_candidates: Tensor | None = None,
+        allow_negative_collisions: bool = False,
+        eval_positive_batch_size: int | None = None,
         sampler_seed: int = 1,
     ) -> None:
         super().__init__()
@@ -195,6 +198,9 @@ class DyGLibLinkBaseline(nn.Module, SharedLinkProtocol):
         self.negative_ratio = negative_ratio
         self.max_positive_pairs = max_positive_pairs
         self.new_edges_only = new_edges_only
+        self.negative_destination_candidates = negative_destination_candidates
+        self.allow_negative_collisions = allow_negative_collisions
+        self.eval_positive_batch_size = eval_positive_batch_size
         self.sampler_seed = sampler_seed
 
         self.register_buffer("_device_anchor", torch.empty(0), persistent=False)
@@ -205,6 +211,7 @@ class DyGLibLinkBaseline(nn.Module, SharedLinkProtocol):
         self._train_sampler: NeighborSampler | None = None
         self._full_sampler: NeighborSampler | None = None
         self._train_destinations: np.ndarray | None = None
+        self._full_destinations: np.ndarray | None = None
         self._negative_rng: np.random.RandomState | None = None
 
     @property
@@ -238,6 +245,7 @@ class DyGLibLinkBaseline(nn.Module, SharedLinkProtocol):
         ]
         self._train_stream = _concatenate(train_streams, self.dimension)
         self._train_destinations = np.unique(self._train_stream.destinations)
+        self._full_destinations = np.unique(full_stream.destinations)
 
         self._train_sampler = _neighbor_sampler(
             self._train_stream,
@@ -435,14 +443,15 @@ class DyGLibLinkBaseline(nn.Module, SharedLinkProtocol):
             negatives = rng.choice(
                 self._train_destinations, size=len(batch), replace=True
             ).astype(np.int64)
-            collision = negatives == batch.destinations
-            while collision.any() and self._train_destinations.size > 1:
-                negatives[collision] = rng.choice(
-                    self._train_destinations,
-                    size=int(collision.sum()),
-                    replace=True,
-                )
+            if not self.allow_negative_collisions:
                 collision = negatives == batch.destinations
+                while collision.any() and self._train_destinations.size > 1:
+                    negatives[collision] = rng.choice(
+                        self._train_destinations,
+                        size=int(collision.sum()),
+                        replace=True,
+                    )
+                    collision = negatives == batch.destinations
 
             optimizer.zero_grad(set_to_none=True)
             if self.is_memory_model:
@@ -481,6 +490,98 @@ class DyGLibLinkBaseline(nn.Module, SharedLinkProtocol):
             total_loss += float(loss.detach().item())
             batches += 1
         return {"loss": total_loss / max(1, batches)}
+
+    @torch.no_grad()
+    def _evaluate_dyglib_random(
+        self,
+        windows: Sequence[Sequence[Snapshot]],
+        history_windows: Sequence[Sequence[Snapshot]],
+        query_seed: int,
+    ) -> dict[str, float]:
+        """Mirror DyGLib's batched random-negative evaluator."""
+        if self._full_sampler is None or self._full_destinations is None:
+            raise RuntimeError("call prepare_streams before evaluation")
+        self._set_sampler(self._full_sampler)
+        backbone, predictor = self._require_prepared()
+        if self.is_memory_model:
+            backbone.memory_bank.__init_memory_bank__()  # type: ignore[attr-defined]
+            history = [
+                self._snapshot_streams[item.time]
+                for item in unique_snapshots(history_windows)
+            ]
+            self._advance_memory(_concatenate(history, self.dimension))
+
+        targets = [
+            self._snapshot_streams[item.time]
+            for item in unique_snapshots(windows, targets_only=True)
+        ]
+        stream = _concatenate(targets, self.dimension)
+        rng = np.random.RandomState(query_seed)
+        score_parts: list[Tensor] = []
+        label_parts: list[Tensor] = []
+        group_parts: list[Tensor] = []
+        group_offset = 0
+        for start in range(0, len(stream), self.eval_pair_batch_size):
+            batch = stream.take(slice(start, start + self.eval_pair_batch_size))
+            negatives = rng.choice(
+                self._full_destinations, size=len(batch), replace=True
+            ).astype(np.int64)
+            if not self.allow_negative_collisions:
+                collision = negatives == batch.destinations
+                while collision.any() and self._full_destinations.size > 1:
+                    negatives[collision] = rng.choice(
+                        self._full_destinations,
+                        size=int(collision.sum()),
+                        replace=True,
+                    )
+                    collision = negatives == batch.destinations
+            if self.is_memory_model:
+                negative_source, negative_destination = self._embeddings(
+                    batch.sources, negatives, batch.timestamps, positive=False
+                )
+                positive_source, positive_destination = self._embeddings(
+                    batch.sources,
+                    batch.destinations,
+                    batch.timestamps,
+                    edge_ids=batch.edge_ids,
+                    positive=True,
+                )
+            else:
+                positive_source, positive_destination = self._embeddings(
+                    batch.sources, batch.destinations, batch.timestamps
+                )
+                negative_source, negative_destination = self._embeddings(
+                    batch.sources, negatives, batch.timestamps
+                )
+            positive_scores = torch.sigmoid(
+                predictor(
+                    input_1=positive_source, input_2=positive_destination
+                ).squeeze(-1)
+            )
+            negative_scores = torch.sigmoid(
+                predictor(
+                    input_1=negative_source, input_2=negative_destination
+                ).squeeze(-1)
+            )
+            score_parts.extend([positive_scores, negative_scores])
+            label_parts.extend(
+                [torch.ones_like(positive_scores), torch.zeros_like(negative_scores)]
+            )
+            group = torch.arange(
+                group_offset,
+                group_offset + len(batch),
+                dtype=torch.long,
+                device=positive_scores.device,
+            )
+            group_parts.extend([group, group])
+            group_offset += len(batch)
+            if self.is_memory_model:
+                backbone.memory_bank.detach_memory_bank()  # type: ignore[attr-defined]
+        if not score_parts:
+            raise ValueError(f"{self.model_name} evaluation produced no events")
+        return self.metrics(
+            torch.cat(label_parts), torch.cat(score_parts), torch.cat(group_parts)
+        )
 
     @torch.no_grad()
     def _evaluate_stateless(
@@ -586,13 +687,21 @@ class DyGLibLinkBaseline(nn.Module, SharedLinkProtocol):
         history_windows: Sequence[Sequence[Snapshot]],
         query_seed: int = 42,
     ) -> dict[str, float]:
+        if (
+            self.negative_ratio == 1.0
+            and self.max_positive_pairs is None
+            and self.eval_positive_batch_size is not None
+        ):
+            return self._evaluate_dyglib_random(
+                windows, history_windows, query_seed
+            )
         if self.is_memory_model:
             return self._evaluate_memory_model(windows, history_windows, query_seed)
         return self._evaluate_stateless(windows, query_seed)
 
 
 class EdgeBankLinkBaseline(nn.Module, SharedLinkProtocol):
-    """EdgeBank unlimited-memory baseline under the shared event protocol."""
+    """EdgeBank baseline under the shared event protocol."""
 
     def __init__(
         self,
@@ -602,6 +711,11 @@ class EdgeBankLinkBaseline(nn.Module, SharedLinkProtocol):
         max_positive_pairs: int | None = 1024,
         new_edges_only: bool = False,
         undirected: bool = False,
+        negative_destination_candidates: Tensor | None = None,
+        allow_negative_collisions: bool = False,
+        eval_positive_batch_size: int | None = None,
+        memory_mode: str = "time_window_memory",
+        time_window_proportion: float = 0.15,
     ) -> None:
         super().__init__()
         if undirected:
@@ -611,6 +725,15 @@ class EdgeBankLinkBaseline(nn.Module, SharedLinkProtocol):
         self.negative_ratio = negative_ratio
         self.max_positive_pairs = max_positive_pairs
         self.new_edges_only = new_edges_only
+        self.negative_destination_candidates = negative_destination_candidates
+        self.allow_negative_collisions = allow_negative_collisions
+        self.eval_positive_batch_size = eval_positive_batch_size
+        if memory_mode not in {"unlimited_memory", "time_window_memory"}:
+            raise ValueError("unsupported EdgeBank memory mode")
+        if not 0.0 < time_window_proportion <= 1.0:
+            raise ValueError("time_window_proportion must be in (0, 1]")
+        self.memory_mode = memory_mode
+        self.time_window_proportion = time_window_proportion
 
     @staticmethod
     def _pairs(snapshot: Snapshot) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -631,6 +754,78 @@ class EdgeBankLinkBaseline(nn.Module, SharedLinkProtocol):
         history_windows: Sequence[Sequence[Snapshot]],
         query_seed: int = 42,
     ) -> dict[str, float]:
+        if (
+            self.negative_ratio == 1.0
+            and self.max_positive_pairs is None
+            and self.eval_positive_batch_size is not None
+        ):
+            history_snapshots = unique_snapshots(history_windows)
+            target_snapshots = unique_snapshots(windows, targets_only=True)
+            history_entries = [self._pairs(snapshot) for snapshot in history_snapshots]
+            target_entries = [self._pairs(snapshot) for snapshot in target_snapshots]
+            history_sources = np.concatenate([entry[0] for entry in history_entries])
+            history_destinations = np.concatenate([entry[1] for entry in history_entries])
+            history_times = np.concatenate([entry[2] for entry in history_entries])
+            target_sources = np.concatenate([entry[0] for entry in target_entries])
+            target_destinations = np.concatenate([entry[1] for entry in target_entries])
+            target_times = np.concatenate([entry[2] for entry in target_entries])
+            pool = self.negative_destination_candidates
+            if pool is None:
+                pool = torch.unique(
+                    torch.as_tensor(
+                        np.concatenate([history_destinations, target_destinations])
+                    ),
+                    sorted=True,
+                )
+            pool_array = pool.detach().cpu().numpy().astype(np.int64)
+            rng = np.random.RandomState(query_seed)
+            scores: list[Tensor] = []
+            labels: list[Tensor] = []
+            groups: list[Tensor] = []
+            group_offset = 0
+            batch_size = self.eval_positive_batch_size
+            for start in range(0, len(target_sources), batch_size):
+                stop = min(start + batch_size, len(target_sources))
+                if self.memory_mode == "time_window_memory":
+                    threshold = np.quantile(
+                        history_times, 1.0 - self.time_window_proportion
+                    )
+                    keep = history_times >= threshold
+                else:
+                    keep = np.ones(len(history_times), dtype=bool)
+                seen = set(
+                    zip(
+                        history_sources[keep].tolist(),
+                        history_destinations[keep].tolist(),
+                    )
+                )
+                source = target_sources[start:stop]
+                positive = target_destinations[start:stop]
+                negative = rng.choice(pool_array, size=len(source), replace=True)
+                positive_scores = torch.tensor(
+                    [float((int(u), int(v)) in seen) for u, v in zip(source, positive)]
+                )
+                negative_scores = torch.tensor(
+                    [float((int(u), int(v)) in seen) for u, v in zip(source, negative)]
+                )
+                scores.extend([positive_scores, negative_scores])
+                labels.extend(
+                    [torch.ones_like(positive_scores), torch.zeros_like(negative_scores)]
+                )
+                group = torch.arange(group_offset, group_offset + len(source))
+                groups.extend([group, group])
+                group_offset += len(source)
+                history_sources = np.concatenate([history_sources, source])
+                history_destinations = np.concatenate(
+                    [history_destinations, positive]
+                )
+                history_times = np.concatenate(
+                    [history_times, target_times[start:stop]]
+                )
+            return self.metrics(
+                torch.cat(labels), torch.cat(scores), torch.cat(groups)
+            )
+
         seen: set[tuple[int, int]] = set()
         for snapshot in unique_snapshots(history_windows):
             sources, destinations, _ = self._pairs(snapshot)

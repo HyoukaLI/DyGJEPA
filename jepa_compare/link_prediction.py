@@ -103,8 +103,15 @@ def sample_link_queries(
     new_edges_only: bool = True,
     undirected: bool = True,
     bipartite_source_count: int | None = None,
+    negative_destination_candidates: Tensor | None = None,
+    allow_negative_collisions: bool = False,
 ) -> LinkQueries:
     """Sample deterministic positive and negative candidate links.
+
+    ``query_edge_index`` represents the raw event stream, so every recorded
+    event is a valid positive, including self-interactions.  This matches the
+    DyGLib random-negative protocol.  Structural ``edge_index`` inputs still
+    use :func:`canonical_pairs`, which removes graph self-loops.
 
     For cumulative snapshot datasets, ``new_edges_only`` removes edges already
     present in the final context snapshot. If no new edge exists, the function
@@ -129,8 +136,6 @@ def sample_link_queries(
             )
         else:
             src, dst = snapshot.query_edge_index
-            keep = src != dst
-            src, dst = src[keep], dst[keep]
             if snapshot.query_timestamps is None:
                 timestamps = torch.full(
                     (src.shape[0],),
@@ -139,7 +144,7 @@ def sample_link_queries(
                     device=device,
                 )
             else:
-                timestamps = snapshot.query_timestamps[keep].to(device=device)
+                timestamps = snapshot.query_timestamps.to(device=device)
             if undirected:
                 src, dst = torch.minimum(src, dst), torch.maximum(src, dst)
             pairs = torch.stack([src, dst], dim=-1)
@@ -179,6 +184,20 @@ def sample_link_queries(
     forbidden = set(
         _pair_keys(valid_pairs(target)[0].cpu(), num_nodes, undirected).tolist()
     )
+    if negative_destination_candidates is None:
+        negative_destination_candidates = torch.arange(
+            bipartite_source_count or 0,
+            num_nodes,
+            dtype=torch.long,
+        )
+    else:
+        negative_destination_candidates = torch.unique(
+            negative_destination_candidates.detach().cpu().to(torch.long),
+            sorted=True,
+        )
+    if negative_destination_candidates.numel() == 0:
+        raise ValueError("negative destination candidate pool is empty")
+
     negative_pairs: list[tuple[int, int]] = []
     negative_groups: list[int] = []
     used_by_group: set[tuple[int, int]] = set()
@@ -187,18 +206,19 @@ def sample_link_queries(
     while len(negative_pairs) < negative_count and attempts < max_attempts:
         group = len(negative_pairs) % positive_count
         u = int(positives[group, 0].item())
-        if bipartite_source_count is None:
-            v = int(torch.randint(num_nodes, (1,), generator=generator).item())
-        else:
-            v = int(
-                torch.randint(
-                    bipartite_source_count,
-                    num_nodes,
-                    (1,),
-                    generator=generator,
-                ).item()
-            )
+        candidate_index = int(
+            torch.randint(
+                negative_destination_candidates.numel(),
+                (1,),
+                generator=generator,
+            ).item()
+        )
+        v = int(negative_destination_candidates[candidate_index].item())
         attempts += 1
+        if allow_negative_collisions:
+            negative_pairs.append((u, v))
+            negative_groups.append(group)
+            continue
         if u == v:
             continue
         if undirected and u > v:
@@ -539,49 +559,41 @@ def binary_roc_auc(labels: Tensor, probabilities: Tensor) -> float:
     return float(auc.item())
 
 
-def grouped_ranking_metrics(
+def link_prediction_metrics(
     labels: Tensor,
     probabilities: Tensor,
     group_ids: Tensor,
-    recall_k: int = 10,
-) -> tuple[float, float]:
-    """Return MRR and Recall@K for one-positive candidate groups."""
-    labels = labels.detach().float()
-    probabilities = probabilities.detach().float().to(labels.device)
-    group_ids = group_ids.detach().long().to(labels.device)
-    if labels.numel() == 0:
-        return float("nan"), float("nan")
-    _, inverse = torch.unique(group_ids, sorted=True, return_inverse=True)
-    group_count = int(inverse.max().item()) + 1
-    positive_counts = torch.zeros(
-        group_count, dtype=labels.dtype, device=labels.device
-    )
-    positive_counts.scatter_add_(0, inverse, labels)
-    if not torch.all(positive_counts == 1):
-        raise ValueError("each ranking group must contain exactly one positive")
+    *,
+    positive_batch_size: int | None = None,
+) -> dict[str, float]:
+    """Compute DyGLib-style AP and AUC.
 
-    # Stable sorts preserve the original candidate order for tied scores.
-    score_order = torch.argsort(probabilities, descending=True, stable=True)
-    group_order = torch.argsort(inverse[score_order], stable=True)
-    ordered_rows = score_order[group_order]
-    ordered_groups = inverse[ordered_rows]
-    positions = torch.arange(
-        ordered_rows.numel(), device=labels.device, dtype=torch.long
-    )
-    group_start_markers = torch.where(
-        torch.cat(
-            [
-                torch.ones(1, dtype=torch.bool, device=labels.device),
-                ordered_groups[1:] != ordered_groups[:-1],
-            ]
-        ),
-        positions,
-        torch.zeros_like(positions),
-    )
-    group_starts = torch.cummax(group_start_markers, dim=0).values
-    ranks = positions - group_starts + 1
-    positive_ranks = ranks[labels[ordered_rows] == 1].float()
-    return (
-        float(positive_ranks.reciprocal().mean().item()),
-        float((positive_ranks <= recall_k).float().mean().item()),
-    )
+    DyGLib reports the arithmetic mean of the AP and AUC computed for each
+    evaluation batch.  A batch contains ``positive_batch_size`` interactions
+    and their sampled negatives.  Sorting by group id recovers chronological
+    positive-event order after candidate shuffling.
+    """
+    if labels.numel() == 0:
+        raise ValueError("link metrics require at least one candidate")
+    if positive_batch_size is None:
+        ap = binary_average_precision(labels, probabilities)
+        auc = binary_roc_auc(labels, probabilities)
+    else:
+        if positive_batch_size < 1:
+            raise ValueError("positive_batch_size must be positive")
+        groups = torch.unique(group_ids, sorted=True)
+        ap_parts: list[float] = []
+        auc_parts: list[float] = []
+        for start in range(0, groups.numel(), positive_batch_size):
+            selected = groups[start : start + positive_batch_size]
+            rows = torch.isin(group_ids, selected)
+            ap_parts.append(binary_average_precision(labels[rows], probabilities[rows]))
+            auc_parts.append(binary_roc_auc(labels[rows], probabilities[rows]))
+        ap = float(sum(ap_parts) / len(ap_parts))
+        auc = float(sum(auc_parts) / len(auc_parts))
+    return {
+        "ap": ap,
+        "auc": auc,
+        "mean_probability": float(probabilities.mean().item()),
+        "examples": float(labels.numel()),
+    }

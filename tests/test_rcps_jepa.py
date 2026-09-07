@@ -11,7 +11,7 @@ from jepa_compare.link_prediction import (
     binary_average_precision,
     binary_roc_auc,
     canonical_pairs,
-    grouped_ranking_metrics,
+    link_prediction_metrics,
     node_transition_statistics,
     sample_link_queries,
     sliding_windows,
@@ -53,6 +53,143 @@ def test_link_query_sampling_is_deterministic_and_disjoint() -> None:
     target = {tuple(pair) for pair in canonical_pairs(graph.snapshots[-1].edge_index, 16).tolist()}
     assert positive <= target
     assert negative.isdisjoint(target)
+
+
+def test_dyglib_random_queries_use_full_destination_pool_and_allow_collisions() -> None:
+    graph = make_synthetic(8, 4, 6, 2, 0.2, seed=9)
+    target = graph.snapshots[-1]
+    positive_destination = canonical_pairs(
+        target.edge_index, 8
+    )[0, 1].reshape(1)
+    queries = sample_link_queries(
+        target,
+        graph.snapshots[-2],
+        negative_ratio=1.0,
+        max_positive=1,
+        seed=3,
+        negative_destination_candidates=positive_destination,
+        allow_negative_collisions=True,
+    )
+    positive = queries.pairs[queries.labels.bool()][0]
+    negative = queries.pairs[~queries.labels.bool()][0]
+    assert negative[0] == positive[0]
+    assert negative[1] == positive_destination[0]
+
+
+def test_raw_event_queries_preserve_self_interactions() -> None:
+    x = torch.zeros(3, 2)
+    target = Snapshot(
+        x=x,
+        edge_index=torch.tensor([[0, 1], [1, 0]]),
+        active=torch.ones(3, dtype=torch.bool),
+        time=1,
+        query_edge_index=torch.tensor([[0, 1, 2], [0, 2, 2]]),
+        query_timestamps=torch.tensor([1.0, 1.1, 1.2]),
+    )
+    queries = sample_link_queries(
+        target,
+        None,
+        negative_ratio=1.0,
+        seed=5,
+        new_edges_only=False,
+        undirected=False,
+        negative_destination_candidates=torch.arange(3),
+        allow_negative_collisions=True,
+    )
+    positives = queries.pairs[queries.labels.bool()]
+    assert sorted(map(tuple, positives.tolist())) == [(0, 0), (1, 2), (2, 2)]
+    assert queries.timestamps is not None
+    positive_times = queries.timestamps[queries.labels.bool()]
+    assert torch.allclose(
+        positive_times.sort().values, target.query_timestamps.sort().values
+    )
+    assert queries.labels.numel() == 2 * target.query_edge_index.shape[1]
+
+
+def test_rcps_separates_training_and_evaluation_negative_ratios() -> None:
+    window = bipartite_windows()[0]
+    model = RCPSJEPA(
+        feature_dim=6,
+        num_nodes=7,
+        hidden_dim=8,
+        rwpe_dim=2,
+        rwpe_walks=2,
+        time_dim=4,
+        gnn_layers=1,
+        window_size=3,
+        predictor_hidden_dim=16,
+        event_dim=2,
+        signature_depth=1,
+        negative_ratio=1.0,
+        train_negative_ratio=4.0,
+        new_edges_only=False,
+        undirected=False,
+        bipartite_source_count=3,
+        negative_destination_candidates=torch.arange(3, 7),
+        allow_negative_collisions=True,
+    )
+    evaluation = model.sample_queries(window, seed=3)
+    training = model.sample_queries(
+        window, seed=3, negative_ratio=model.train_negative_ratio
+    )
+    positives = int(evaluation.labels.sum().item())
+    assert evaluation.labels.numel() == positives * 2
+    assert training.labels.numel() == positives * 5
+
+
+def test_rcps_history_is_strictly_causal_within_a_snapshot() -> None:
+    x = torch.zeros(3, 2)
+    first = Snapshot(
+        x=x,
+        edge_index=torch.tensor([[0, 2], [2, 0]]),
+        active=torch.ones(3, dtype=torch.bool),
+        time=0,
+        query_edge_index=torch.tensor([[0], [2]]),
+        query_timestamps=torch.tensor([1.0]),
+    )
+    second = Snapshot(
+        x=x,
+        edge_index=torch.tensor([[0, 2], [2, 0]]),
+        active=torch.ones(3, dtype=torch.bool),
+        time=1,
+        query_edge_index=torch.tensor([[0, 0, 0], [2, 2, 2]]),
+        query_timestamps=torch.tensor([10.0, 10.0, 11.0]),
+    )
+    model = RCPSJEPA(
+        feature_dim=2,
+        num_nodes=3,
+        hidden_dim=4,
+        rwpe_dim=1,
+        rwpe_walks=1,
+        time_dim=2,
+        gnn_layers=1,
+        window_size=2,
+        predictor_hidden_dim=8,
+        event_dim=2,
+        signature_depth=1,
+        use_causal_history=True,
+        history_semantic_dim=0,
+    )
+    model.prepare_causal_history([first, second])
+    pairs = torch.tensor([[0, 2], [0, 2], [0, 2]])
+    features = model._causal_history_features(
+        second, pairs, torch.tensor([10.0, 10.0, 11.0])
+    )
+    # Events tied at timestamp 10 cannot observe one another. The event at 11
+    # observes both timestamp-10 interactions plus the earlier snapshot event.
+    expected_counts = torch.log1p(torch.tensor([1.0, 1.0, 3.0]))
+    assert torch.allclose(features[:, 0], expected_counts)
+
+
+def test_dyglib_metrics_average_ap_auc_by_positive_batch() -> None:
+    labels = torch.tensor([1.0, 0.0, 1.0, 0.0])
+    probabilities = torch.tensor([0.9, 0.8, 0.1, 0.2])
+    groups = torch.tensor([0, 0, 1, 1])
+    metrics = link_prediction_metrics(
+        labels, probabilities, groups, positive_batch_size=1
+    )
+    assert metrics["ap"] == 0.75
+    assert metrics["auc"] == 0.5
 
 
 def test_node_relation_path_encodes_structural_transitions() -> None:
@@ -345,8 +482,6 @@ def test_jodie_keeps_stream_state_under_shared_query_protocol() -> None:
     assert metrics["examples"] == 9.0
     assert 0.0 <= metrics["ap"] <= 1.0
     assert 0.0 <= metrics["auc"] <= 1.0
-    assert 0.0 <= metrics["mrr"] <= 1.0
-    assert 0.0 <= metrics["recall_at_10"] <= 1.0
 
 
 def test_rcps_train_epoch_steps_each_pair_batch() -> None:
@@ -458,11 +593,11 @@ def test_shared_driver_runs_native_jodie_train_validation_and_test() -> None:
         seed=17,
     )
     assert 0.0 <= validation["ap"] <= 1.0
-    assert 0.0 <= test["mrr"] <= 1.0
+    assert 0.0 <= test["auc"] <= 1.0
     assert test["best_epoch"] == 1.0
 
 
-def test_bipartite_queries_corrupt_only_destination_and_rank() -> None:
+def test_bipartite_queries_corrupt_only_destination() -> None:
     x = torch.randn(7, 4)
     # Three users [0, 3), four items [3, 7); reverse edges are message-only.
     query_edges = torch.tensor([[0, 1, 0], [3, 4, 3]])
@@ -486,12 +621,6 @@ def test_bipartite_queries_corrupt_only_destination_and_rank() -> None:
     assert torch.all(queries.pairs[:, 0] < 3)
     assert torch.all(queries.pairs[:, 1] >= 3)
     assert int(queries.labels.sum().item()) == 3  # duplicate edits are preserved
-    scores = torch.where(queries.labels.bool(), 1.0, 0.0)
-    mrr, recall = grouped_ranking_metrics(
-        queries.labels, scores, queries.group_ids, recall_k=1
-    )
-    assert mrr == 1.0
-    assert recall == 1.0
 
 
 def test_temporal_window_split_is_chronological() -> None:
@@ -501,20 +630,11 @@ def test_temporal_window_split_is_chronological() -> None:
     assert split.validation[-1][-1].time < split.test[0][-1].time
 
 
-def test_vectorized_link_metrics_preserve_ties_and_group_ranks() -> None:
+def test_vectorized_binary_metrics_preserve_ties() -> None:
     labels = torch.tensor([1.0, 0.0, 1.0, 0.0])
     scores = torch.tensor([0.5, 0.5, 1.0, 0.0])
     assert binary_average_precision(labels, scores) == 1.0
     assert binary_roc_auc(labels, scores) == 0.875
-
-    group_labels = torch.tensor([0.0, 1.0, 1.0, 0.0, 0.0, 0.0])
-    group_scores = torch.tensor([0.8, 0.9, 0.7, 0.8, 0.1, 0.7])
-    group_ids = torch.tensor([9, 4, 9, 4, 9, 4])
-    mrr, recall = grouped_ranking_metrics(
-        group_labels, group_scores, group_ids, recall_k=1
-    )
-    assert mrr == 0.75
-    assert recall == 0.5
 
 
 def test_official_dyglib_backbones_follow_shared_protocol() -> None:
@@ -583,6 +703,38 @@ def test_official_dyglib_backbones_follow_shared_protocol() -> None:
         split.validation, split.train, query_seed=37
     )
     assert 0.0 <= edge_metrics["auc"] <= 1.0
+
+
+def test_dyglib_random_event_evaluator_uses_all_target_events() -> None:
+    windows = bipartite_windows()
+    snapshots = unique_snapshots(windows)
+    destination_pool = torch.unique(
+        torch.cat([snapshot.query_edge_index[1] for snapshot in snapshots])
+    )
+    model = DyGLibLinkBaseline(
+        model_name="tcl",
+        feature_dim=6,
+        num_nodes=7,
+        bipartite_source_count=3,
+        interaction_feature_dim=2,
+        time_feat_dim=2,
+        num_layers=1,
+        num_heads=1,
+        num_neighbors=2,
+        train_batch_size=2,
+        eval_pair_batch_size=2,
+        negative_ratio=1.0,
+        max_positive_pairs=None,
+        negative_destination_candidates=destination_pool,
+        allow_negative_collisions=True,
+        eval_positive_batch_size=2,
+    )
+    model.prepare_streams(snapshots, snapshots[:3])
+    metrics = model.evaluate_protocol(
+        windows[2:], windows[:2], query_seed=2
+    )
+    target_events = sum(window[-1].query_edge_index.shape[1] for window in windows[2:])
+    assert metrics["examples"] == 2.0 * target_events
 
 
 def test_dyglib_adapter_zero_pads_low_dimensional_event_features() -> None:

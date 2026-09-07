@@ -10,9 +10,7 @@ from torch import Tensor, nn
 from .data import Snapshot
 from .link_prediction import (
     LinkQueries,
-    binary_average_precision,
-    binary_roc_auc,
-    grouped_ranking_metrics,
+    link_prediction_metrics,
     sample_link_queries,
 )
 
@@ -333,6 +331,9 @@ class SharedLinkProtocol:
     negative_ratio: float
     max_positive_pairs: int | None
     new_edges_only: bool
+    negative_destination_candidates: Tensor | None
+    allow_negative_collisions: bool
+    eval_positive_batch_size: int | None
 
     def sample_queries(self, window: Sequence[Snapshot], seed: int) -> LinkQueries:
         return sample_link_queries(
@@ -344,20 +345,16 @@ class SharedLinkProtocol:
             new_edges_only=self.new_edges_only,
             undirected=False,
             bipartite_source_count=self.num_users,
+            negative_destination_candidates=self.negative_destination_candidates,
+            allow_negative_collisions=self.allow_negative_collisions,
         )
 
-    @staticmethod
     def metrics(
-        labels: Tensor, scores: Tensor, groups: Tensor
+        self, labels: Tensor, scores: Tensor, groups: Tensor
     ) -> dict[str, float]:
-        mrr, recall_at_10 = grouped_ranking_metrics(
-            labels, scores, groups, recall_k=10
+        return link_prediction_metrics(
+            labels,
+            scores,
+            groups,
+            positive_batch_size=self.eval_positive_batch_size,
         )
-        return {
-            "ap": binary_average_precision(labels, scores),
-            "auc": binary_roc_auc(labels, scores),
-            "mrr": mrr,
-            "recall_at_10": recall_at_10,
-            "mean_probability": float(scores.mean().item()),
-            "examples": float(labels.numel()),
-        }
