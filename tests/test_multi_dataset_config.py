@@ -6,6 +6,7 @@ import yaml
 from jepa_compare.compare_link_prediction import (
     _aggregate_seed_runs,
     _dataset_configs,
+    _seed_output_path,
     _seed_values,
 )
 
@@ -84,3 +85,53 @@ def test_seed_aggregation_preserves_provenance_strings() -> None:
     }
     aggregate = _aggregate_seed_runs(runs)
     assert aggregate["model"]["test"]["protocol"] == "dyglib"
+
+
+def test_output_name_claims_a_per_model_filename() -> None:
+    """Every model of a dataset otherwise writes the same result filenames."""
+    config = {
+        "datasets": [
+            {
+                "name": "wikipedia",
+                "path": "data/processed/wikipedia.npz",
+                "interaction_feature_dim": 172,
+            }
+        ],
+        "output_dir": "results/wikipedia",
+        "output_name": "rcps_jepa",
+    }
+    (name, expanded), = _dataset_configs(config)
+    assert name == "wikipedia"
+    assert expanded["output_path"] == "results/wikipedia/rcps_jepa.json"
+    assert (
+        str(_seed_output_path(Path(expanded["output_path"]), 3))
+        == "results/wikipedia/rcps_jepa_seed3.json"
+    )
+
+
+def test_output_name_without_it_keeps_the_dataset_filename() -> None:
+    config = {
+        "datasets": [
+            {
+                "name": "wikipedia",
+                "path": "data/processed/wikipedia.npz",
+                "interaction_feature_dim": 172,
+            }
+        ],
+        "output_dir": "results",
+    }
+    (_, expanded), = _dataset_configs(config)
+    assert expanded["output_path"] == "results/link_comparison_wikipedia.json"
+
+
+def test_output_name_is_rejected_for_more_than_one_dataset() -> None:
+    """Two datasets sharing one filename stem would overwrite each other."""
+    config = {
+        "datasets": [
+            {"name": "wikipedia", "path": "a.npz", "interaction_feature_dim": 172},
+            {"name": "mooc", "path": "b.npz", "interaction_feature_dim": 4},
+        ],
+        "output_name": "rcps_jepa",
+    }
+    with pytest.raises(ValueError, match="output_name needs exactly one dataset"):
+        _dataset_configs(config)

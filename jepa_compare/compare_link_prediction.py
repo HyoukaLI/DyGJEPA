@@ -765,6 +765,15 @@ def _dataset_configs(config: dict) -> list[tuple[str, dict]]:
     base.pop("datasets", None)
     summary_output_path = base.pop("summary_output_path", None)
     output_dir = Path(base.pop("output_dir", "results"))
+    # Result filenames are derived from the dataset alone, so every model of a
+    # dataset writes the same names.  output_name lets one run claim its own
+    # filename, which is what makes per-model runs safe to execute in parallel.
+    output_name = base.pop("output_name", None)
+    if output_name is not None and len(entries) != 1:
+        raise ValueError(
+            "output_name needs exactly one dataset; "
+            f"got {len(entries)} - narrow the run with --datasets"
+        )
     expanded: list[tuple[str, dict]] = []
     seen: set[str] = set()
     # JODIE consumes the original event width. TGAT and all DyGLib backbones,
@@ -792,7 +801,8 @@ def _dataset_configs(config: dict) -> list[tuple[str, dict]]:
         current = deepcopy(base)
         current["dataset_name"] = name
         current["data"] = {**dict(current.get("data", {})), "path": str(path)}
-        current["output_path"] = str(output_dir / f"link_comparison_{name}.json")
+        stem = output_name or f"link_comparison_{name}"
+        current["output_path"] = str(output_dir / f"{stem}.json")
         if dataset_models is not None:
             allowed = [str(model).lower() for model in dataset_models]
             globally_requested = current.get("models")
@@ -850,6 +860,15 @@ def main() -> None:
         help="run only these entries from a multi-dataset config",
     )
     parser.add_argument("--output", type=Path, default=None, help="override output JSON path")
+    parser.add_argument(
+        "--output-name",
+        default=None,
+        help=(
+            "filename stem for the result JSON, e.g. --output-name rcps_jepa "
+            "writes <output>/rcps_jepa.json and <output>/rcps_jepa_seed<n>.json; "
+            "requires a single dataset"
+        ),
+    )
     wandb_logging.add_cli_arguments(parser)
     args = parser.parse_args()
     with args.config.open() as handle:
@@ -874,6 +893,20 @@ def main() -> None:
             for entry in config["datasets"]
             if str(entry["name"]).lower() in requested_datasets
         ]
+    if args.output_name is not None:
+        if not config.get("datasets"):
+            raise ValueError(
+                "--output-name applies to multi-dataset configs; "
+                "use --output to name the file of a single-dataset config"
+            )
+        config["output_name"] = args.output_name
+        # The cross-dataset summary is named after the config, not the run, so
+        # it would collide between models exactly as the per-dataset file does.
+        summary = config.get("summary_output_path")
+        if summary is not None:
+            config["summary_output_path"] = str(
+                Path(summary).with_name(f"{args.output_name}_summary.json")
+            )
     if args.models:
         config["models"] = args.models
     if args.max_positive_pairs is not None:

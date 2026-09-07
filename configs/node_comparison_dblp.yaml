@@ -1,3 +1,5 @@
+# Names this run for reporting and for the wandb run/group labels.
+dataset_name: dblp
 seed: 42
 device: auto
 output_path: results/node_comparison_dblp.json

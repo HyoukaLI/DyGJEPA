@@ -53,10 +53,30 @@ COMMAND=(
   "$PYTHON_BIN" -m jepa_compare.compare_link_prediction
   --config configs/link_comparison_all.yaml
 )
-# Override at submission time when only a subset is needed, for example:
-# DATASET_NAMES="mooc lastfm" sbatch run_link_datasets.sbatch
+# Narrow the run at submission time.  Each variable takes a space-separated
+# list and is passed straight through to the comparison entry point:
+#
+#   DATASET_NAMES="mooc lastfm" sbatch run_link_datasets.sbatch
+#   DATASET_NAMES="wikipedia" MODELS="rcps_jepa" sbatch run_link_datasets.sbatch
+#   DATASET_NAMES="wikipedia" MODELS="rcps_jepa" SEEDS="0" EPOCHS=2 \
+#     sbatch run_link_datasets.sbatch      # quick end-to-end check
 if [[ -n "${DATASET_NAMES:-}" ]]; then
   read -r -a DATASETS <<< "$DATASET_NAMES"
   COMMAND+=(--datasets "${DATASETS[@]}")
 fi
+if [[ -n "${MODELS:-}" ]]; then
+  read -r -a MODEL_NAMES <<< "$MODELS"
+  COMMAND+=(--models "${MODEL_NAMES[@]}")
+fi
+if [[ -n "${SEEDS:-}" ]]; then
+  read -r -a SEED_VALUES <<< "$SEEDS"
+  COMMAND+=(--seeds "${SEED_VALUES[@]}")
+fi
+if [[ -n "${EPOCHS:-}" ]]; then
+  COMMAND+=(--epochs "$EPOCHS")
+fi
+
+printf '[%s] command:' "$(date --iso-8601=seconds)"
+printf ' %q' "${COMMAND[@]}"
+printf '\n'
 "${COMMAND[@]}"

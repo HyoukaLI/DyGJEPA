@@ -58,4 +58,7 @@ fi
 if [[ -n "${OUTPUT_DIR:-}" ]]; then
   COMMAND+=(--output "$OUTPUT_DIR")
 fi
+if [[ -n "${OUTPUT_NAME:-}" ]]; then
+  COMMAND+=(--output-name "$OUTPUT_NAME")
+fi
 "${COMMAND[@]}"

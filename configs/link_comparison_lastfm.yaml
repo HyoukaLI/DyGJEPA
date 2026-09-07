@@ -1,3 +1,5 @@
+# Names this run for reporting and for the wandb run/group labels.
+dataset_name: lastfm
 seed: [0, 1, 2, 3, 4]
 device: auto
 output_path: results/link_comparison_lastfm.json
