@@ -31,6 +31,16 @@ cd "$PROJECT_DIR"
 mkdir -p logs results
 export PYTHONPATH="$PROJECT_DIR${PYTHONPATH:+:$PYTHONPATH}"
 
+# Weights & Biases (optional).  Submit with DYGJEPA_WANDB=1 to enable:
+#   DYGJEPA_WANDB=1 sbatch run_link_datasets.sbatch
+# mode auto tries an online run and falls back to offline on a network-less
+# node; upload those later from the login node with:
+#   wandb sync wandb/offline-run-*
+# (Slurm forwards the submitting environment, so DYGJEPA_WANDB=1 reaches the job.
+#  It is deliberately not defaulted here, so wandb.enabled in the YAML still works.)
+export WANDB_PROJECT="${WANDB_PROJECT:-dygjepa}"
+export WANDB_DIR="${WANDB_DIR:-$PROJECT_DIR}"
+
 echo "[$(date --iso-8601=seconds)] host=$(hostname) job=${SLURM_JOB_ID:-local}"
 echo "config=$CONFIG"
 echo "data=$DATA"

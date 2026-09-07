@@ -35,6 +35,8 @@ from .snapshot_ssl_baselines import (
     SnapshotSSLLinkBaseline,
 )
 from .train_sg_jepa import choose_device, cpu_state_dict, device_description
+from . import wandb_logging
+from .wandb_logging import flatten as _flat
 
 
 def _deep_update(target: dict, updates: dict) -> dict:
@@ -257,6 +259,25 @@ def _train_node_model(
     training: dict,
     seed: int,
 ) -> dict[str, float]:
+    """Train one latent model, mirroring its epochs into a wandb run."""
+    with wandb_logging.run_for_model(name, seed, {"training": training}) as wb_run:
+        result = _train_node_model_inner(
+            name, model, graph, windows, probe_split, training, seed, wb_run
+        )
+        wb_run.summary(_flat("final", result))
+        return result
+
+
+def _train_node_model_inner(
+    name: str,
+    model: nn.Module,
+    graph,
+    windows,
+    probe_split,
+    training: dict,
+    seed: int,
+    wb_run,
+) -> dict[str, float]:
     optimizer = torch.optim.AdamW(
         model.parameters(),
         lr=float(training["learning_rate"]),
@@ -327,6 +348,10 @@ def _train_node_model(
                 }
             )
         )
+        wb_run.log(
+            {**_flat("train", metrics), **_flat("val_probe", validation)},
+            step=epoch,
+        )
         if validation["macro_f1"] > best_score and epoch >= min_checkpoint_epoch:
             best_score = validation["macro_f1"]
             best_epoch = epoch
@@ -385,6 +410,23 @@ def _train_supervised_tgnn(
     probe_split,
     settings: dict,
 ) -> dict[str, float]:
+    """Train one supervised baseline, mirroring its epochs into a wandb run."""
+    with wandb_logging.run_for_model(name, extra_config={"settings": settings}) as wb_run:
+        result = _train_supervised_tgnn_inner(
+            name, model, graph, probe_split, settings, wb_run
+        )
+        wb_run.summary(_flat("final", result))
+        return result
+
+
+def _train_supervised_tgnn_inner(
+    name: str,
+    model: nn.Module,
+    graph,
+    probe_split,
+    settings: dict,
+    wb_run,
+) -> dict[str, float]:
     """Validation-select, then refit on the complete label budget.
 
     The validation run sees ``probe_split.train`` labels only.  After choosing
@@ -436,6 +478,10 @@ def _train_supervised_tgnn(
                         "validation": validation,
                     }
                 )
+            )
+            wb_run.log(
+                {"train/loss": float(loss.detach()), **_flat("val", validation)},
+                step=epoch,
             )
             if validation["macro_f1"] > best_score:
                 best_score = validation["macro_f1"]
@@ -490,6 +536,25 @@ def _train_temporal_ssl_node_baseline(
     probe_settings: dict,
     seed: int,
 ) -> dict[str, float]:
+    """Pretrain on edges, probe nodes, and mirror both into a wandb run."""
+    with wandb_logging.run_for_model(name, seed, {"settings": settings}) as wb_run:
+        result = _train_temporal_ssl_node_baseline_inner(
+            name, model, graph, probe_split, settings, probe_settings, seed, wb_run
+        )
+        wb_run.summary(_flat("final", result))
+        return result
+
+
+def _train_temporal_ssl_node_baseline_inner(
+    name: str,
+    model: TGNNodeSSL | TGATNodeSSL | DyGLibStatelessNodeSSL,
+    graph,
+    probe_split,
+    settings: dict,
+    probe_settings: dict,
+    seed: int,
+    wb_run,
+) -> dict[str, float]:
     model.prepare(graph)
     optimizer = torch.optim.Adam(
         [parameter for parameter in model.parameters() if parameter.requires_grad],
@@ -534,6 +599,10 @@ def _train_temporal_ssl_node_baseline(
                         "validation_probe": validation,
                     }
                 )
+            )
+            wb_run.log(
+                {**_flat("train", metrics), **_flat("val_probe", validation)},
+                step=epoch,
             )
             if validation["macro_f1"] > best_score:
                 best_score = validation["macro_f1"]
@@ -580,6 +649,25 @@ def _train_snapshot_ssl_node_baseline(
     probe_settings: dict,
     seed: int,
 ) -> dict[str, float]:
+    """Pretrain on snapshots, probe nodes, and mirror both into a wandb run."""
+    with wandb_logging.run_for_model(name, seed, {"settings": settings}) as wb_run:
+        result = _train_snapshot_ssl_node_baseline_inner(
+            name, model, graph, probe_split, settings, probe_settings, seed, wb_run
+        )
+        wb_run.summary(_flat("final", result))
+        return result
+
+
+def _train_snapshot_ssl_node_baseline_inner(
+    name: str,
+    model: SnapshotSSLLinkBaseline,
+    graph,
+    probe_split,
+    settings: dict,
+    probe_settings: dict,
+    seed: int,
+    wb_run,
+) -> dict[str, float]:
     """Self-supervise a snapshot encoder, then use the common frozen probe."""
     parameters = model.pretrain_parameters()
     optimizer = torch.optim.Adam(
@@ -624,6 +712,10 @@ def _train_snapshot_ssl_node_baseline(
                     }
                 )
             )
+            wb_run.log(
+                {**_flat("train", metrics), **_flat("val_probe", validation)},
+                step=epoch,
+            )
             if validation["macro_f1"] > best_score:
                 best_score = validation["macro_f1"]
                 best_epoch = epoch
@@ -655,6 +747,9 @@ def _train_snapshot_ssl_node_baseline(
 
 
 def run(config: dict) -> dict[str, dict[str, float]]:
+    wandb_logging.configure(
+        config, task="node", dataset=str(config.get("dataset_name", "single"))
+    )
     seed = int(config["seed"])
     random.seed(seed)
     np.random.seed(seed)
@@ -911,8 +1006,10 @@ def main() -> None:
         default=None,
         help="override node_baselines.enabled (pass no values to disable all baselines)",
     )
+    wandb_logging.add_cli_arguments(parser)
     args = parser.parse_args()
     config = _load_config(args.config)
+    wandb_logging.apply_cli_overrides(config, args)
     if args.seeds is not None:
         config["seed"] = args.seeds[0] if len(args.seeds) == 1 else args.seeds
     if args.datasets is not None:

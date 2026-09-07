@@ -21,6 +21,7 @@ features = [
   "scipy>=1.11",
   "tqdm>=4.66",
 ]
+tracking = ["wandb>=0.17"]
 
 [project.scripts]
 sg-node-train = "jepa_compare.train_sg_jepa:main"

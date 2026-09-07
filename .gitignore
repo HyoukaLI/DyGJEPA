@@ -14,3 +14,4 @@ results/
 ara-output/
 .DS_Store
 githubkey.pub
+wandb/

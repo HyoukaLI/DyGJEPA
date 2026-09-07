@@ -30,6 +30,8 @@ from .train_sg_jepa import (
     device_description,
     release_device_memory,
 )
+from . import wandb_logging
+from .wandb_logging import flatten as _flat
 
 
 def _build_graph(config: dict, seed: int):
@@ -104,6 +106,19 @@ def _train_one(
     training: dict,
     seed: int,
 ) -> tuple[dict[str, float], dict[str, float]]:
+    """Train one model, mirroring its epochs into a wandb run when enabled."""
+    with wandb_logging.run_for_model(name, seed, {"training": training}) as wb_run:
+        return _train_one_inner(name, model, split, training, seed, wb_run)
+
+
+def _train_one_inner(
+    name: str,
+    model: nn.Module,
+    split: TemporalWindowSplit,
+    training: dict,
+    seed: int,
+    wb_run,
+) -> tuple[dict[str, float], dict[str, float]]:
     native_jodie = isinstance(model, JODIELinkBaseline)
     native_event_model = isinstance(
         model,
@@ -166,6 +181,7 @@ def _train_one(
         model.eval()
         validation = evaluate(split.validation, split.train, validation_query_seed)
         print(json.dumps({"model": name, "epoch": 0, "validation": validation}))
+        wb_run.log(_flat("val", validation), step=0)
         best_metrics = {metric: validation[metric] for metric in checkpoint_metrics}
         best_epoch = 0
         best_state = cpu_state_dict(model)
@@ -220,6 +236,7 @@ def _train_one(
             optimizer.step()
         if not np.isfinite(loss_value):
             raise RuntimeError(f"{name} produced a non-finite loss at epoch {epoch}")
+        wb_run.log(_flat("train", metrics), step=epoch)
         if hasattr(model, "update_target_encoder") and not (
             isinstance(model, RCPSJEPA)
             and (
@@ -237,6 +254,7 @@ def _train_one(
             if scheduler is not None:
                 scheduler.step(validation["ap"])
             print(json.dumps({"model": name, "epoch": epoch, "train": metrics, "validation": validation}))
+            wb_run.log(_flat("val", validation), step=epoch)
             if all(
                 validation[metric] >= best_metrics[metric]
                 for metric in checkpoint_metrics
@@ -265,6 +283,13 @@ def _train_one(
         test_query_seed,
     )
     test["best_epoch"] = float(best_epoch)
+    wb_run.summary(
+        {
+            **_flat("final/val", validation),
+            **_flat("final/test", test),
+            "best_epoch": best_epoch,
+        }
+    )
     return validation, test
 
 
@@ -276,6 +301,21 @@ def _train_snapshot_ssl_one(
     seed: int,
 ) -> tuple[dict[str, float], dict[str, float | str]]:
     """Run native SSL pretraining followed by a shared frozen link probe."""
+    with wandb_logging.run_for_model(name, seed, {"training": training}) as wb_run:
+        return _train_snapshot_ssl_one_inner(
+            name, model, split, training, seed, wb_run
+        )
+
+
+def _train_snapshot_ssl_one_inner(
+    name: str,
+    model: SnapshotSSLLinkBaseline,
+    split: TemporalWindowSplit,
+    training: dict,
+    seed: int,
+    wb_run,
+) -> tuple[dict[str, float], dict[str, float | str]]:
+    """Pretrain, then fit the frozen probe, logging both stages separately."""
     pretrain_optimizer = torch.optim.Adam(
         model.pretrain_parameters(),
         lr=float(training["pretrain_learning_rate"]),
@@ -295,6 +335,7 @@ def _train_snapshot_ssl_one(
             raise RuntimeError(f"{name} produced a non-finite SSL loss at epoch {epoch}")
         if epoch == 1 or epoch % int(training.get("pretrain_log_every", 10)) == 0 or epoch == pretrain_epochs:
             print(json.dumps({"model": name, "stage": "ssl_pretrain", "epoch": epoch, "train": metrics}))
+        wb_run.log(_flat("pretrain", metrics), step=epoch)
 
     model.freeze_encoder()
     model.eval()
@@ -332,6 +373,14 @@ def _train_snapshot_ssl_one(
                 query_seed=validation_query_seed,
             )
             print(json.dumps({"model": name, "stage": "frozen_link_probe", "epoch": epoch, "train": metrics, "validation": validation}))
+            wb_run.log(
+                {
+                    **_flat("train", metrics),
+                    **_flat("val", validation),
+                    "probe_epoch": float(epoch),
+                },
+                step=pretrain_epochs + epoch,
+            )
             if all(
                 validation[metric] >= best_metrics[metric]
                 for metric in checkpoint_metrics
@@ -368,6 +417,14 @@ def _train_snapshot_ssl_one(
             "implementation": model.implementation,
         }
     )
+    wb_run.summary(
+        {
+            **_flat("final/val", validation),
+            **_flat("final/test", test),
+            "best_epoch": best_epoch,
+            "pretrain_epochs": pretrain_epochs,
+        }
+    )
     return validation, test
 
 
@@ -401,6 +458,9 @@ def _requested_models(config: dict) -> set[str] | None:
 
 def run(config: dict) -> dict[str, dict[str, dict[str, float]]]:
     seed = int(config["seed"])
+    wandb_logging.configure(
+        config, task="link", dataset=str(config.get("dataset_name", "single"))
+    )
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
@@ -790,9 +850,11 @@ def main() -> None:
         help="run only these entries from a multi-dataset config",
     )
     parser.add_argument("--output", type=Path, default=None, help="override output JSON path")
+    wandb_logging.add_cli_arguments(parser)
     args = parser.parse_args()
     with args.config.open() as handle:
         config = yaml.safe_load(handle)
+    wandb_logging.apply_cli_overrides(config, args)
     if args.seeds is not None:
         config["seed"] = args.seeds[0] if len(args.seeds) == 1 else args.seeds
     if args.datasets:

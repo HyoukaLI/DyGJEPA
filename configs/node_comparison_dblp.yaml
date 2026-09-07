@@ -221,3 +221,16 @@ training:
   # Use only the learned dynamic view for RCPS checkpoint selection.
   rcps_checkpoint_views: [fused]
   min_checkpoint_epoch: 25
+
+# Weights & Biases (off by default).  Enable with --wandb on the command line
+# or DYGJEPA_WANDB=1 in the environment.  mode: auto tries an online run first
+# and falls back to an offline one when the compute node has no network.
+wandb:
+  enabled: false
+  project: dygjepa
+  entity: null
+  mode: auto
+  group: null
+  tags: []
+  dir: null
+  init_timeout: 30

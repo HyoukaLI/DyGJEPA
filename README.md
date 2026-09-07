@@ -215,6 +215,86 @@ five runs.
 Local logs and result files are ignored by Git. Send the generated JSON files
 back to the experiment owner separately unless explicitly asked to commit them.
 
+## 7. Weights & Biases (optional)
+
+Experiment tracking is off by default and the runners are fully usable without
+it. To install the extra:
+
+```bash
+python -m pip install -e ".[tracking]"     # or: pip install -r requirements-tracking.txt
+wandb login                                 # once per machine
+```
+
+Enable it per run:
+
+```bash
+python -m jepa_compare.compare_link_prediction --config configs/link_comparison_all.yaml --wandb
+python -m jepa_compare.compare_node_prediction --config configs/node_comparison_all.yaml --wandb
+```
+
+or per environment, which is what the Slurm scripts forward:
+
+```bash
+DYGJEPA_WANDB=1 sbatch run_link_datasets.sbatch
+```
+
+### What gets logged
+
+One run per `(dataset, model, seed)` triple, so seeds and models stay
+separable:
+
+```text
+name      wikipedia-rcps_jepa-s0
+group     link-wikipedia          # every model and seed of one dataset
+job_type  rcps_jepa               # group by this to average over seeds
+tags      link, wikipedia, rcps_jepa, seed-0
+```
+
+Metrics use the epoch as the step: `train/*` every epoch, `val/*` on every
+evaluation epoch, and the selected checkpoint's `final/val/*` and
+`final/test/*` in the run summary. SSL baselines log their pretraining stage
+under `pretrain/*` and continue the probe stage after the last pretraining
+epoch, so the two never share a step. The JSON files under `results/` are
+written exactly as before — wandb is an addition, not a replacement.
+
+### Offline clusters
+
+`mode: auto` (the default) tries an online run once. If the compute node
+cannot reach `api.wandb.ai`, it prints the reason, switches to offline for the
+rest of the process, and writes to `$WANDB_DIR/wandb`. Upload afterwards from a
+node that has network:
+
+```bash
+wandb sync wandb/offline-run-*
+```
+
+Set `mode: offline` to skip the online attempt entirely, or `mode: disabled`
+to turn tracking off from the config. Every failure path is non-fatal: a
+missing package, a failed login, or a dropped connection prints a warning and
+training continues.
+
+### Configuration
+
+Each comparison config carries a `wandb` block:
+
+```yaml
+wandb:
+  enabled: false
+  project: dygjepa
+  entity: null        # team or user; null uses your default
+  mode: auto          # auto | online | offline | disabled
+  group: null         # null derives "<task>-<dataset>"
+  tags: []            # appended to the automatic tags
+  dir: null           # parent of the offline "wandb" directory
+  init_timeout: 30    # seconds to wait before falling back to offline
+```
+
+Precedence is environment > command line > config file. The environment
+variables are `DYGJEPA_WANDB`, `WANDB_MODE`, `WANDB_PROJECT`, `WANDB_ENTITY`
+and `WANDB_DIR`; the flags are `--wandb` / `--no-wandb`, `--wandb-project`,
+`--wandb-entity`, `--wandb-mode`, `--wandb-group`, `--wandb-tags` and
+`--wandb-dir`.
+
 ## Troubleshooting
 
 ### Missing processed datasets
