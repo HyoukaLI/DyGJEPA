@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
@@ -165,6 +166,15 @@ def load_npz(path: str | Path) -> DynamicGraph:
     """
     raw = np.load(Path(path), allow_pickle=True)
     features = raw["features"]
+    if "feature_source" in raw and str(raw["feature_source"]) == "structural-fallback":
+        warnings.warn(
+            f"{path} carries the 4-D structural fallback instead of SpikeNet DeepWalk "
+            "features; node-classification results will NOT match the SG-JEPA/SpikeNet "
+            "protocol (every model degenerates to the majority class). Rebuild the archive "
+            "with the <dataset>.npy features (see data/README.md).",
+            RuntimeWarning,
+            stacklevel=2,
+        )
     active = raw["active"] if "active" in raw else np.ones(features.shape[:2], bool)
     snapshots = []
     for t in range(features.shape[0]):

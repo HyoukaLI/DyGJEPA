@@ -161,7 +161,9 @@ def _cumulative_undirected(increments: list[np.ndarray]) -> list[np.ndarray]:
     return cumulative
 
 
-def _load_features(path: Path, steps: int, nodes: int) -> np.ndarray:
+def _load_features(
+    path: Path, steps: int, nodes: int, scratch: Path | None = None
+) -> np.ndarray:
     source = np.load(path, mmap_mode="r")
     expected_prefix = (steps, nodes)
     if source.ndim != 3 or source.shape[:2] != expected_prefix:
@@ -172,12 +174,22 @@ def _load_features(path: Path, steps: int, nodes: int) -> np.ndarray:
         raise ValueError(
             f"SpikeNet DeepWalk uses 80 feature dimensions; got {source.shape[2]}"
         )
-    # SpikeNet standardizes every snapshot as one flattened vector. Normalizing
-    # one slice at a time avoids an additional full-size temporary array.
-    features = np.empty(source.shape, dtype=np.float32)
+    # SpikeNet standardizes every snapshot as one flattened vector
+    # (sklearn preprocessing.scale(x.reshape(T, N*F), axis=1)). Normalizing one
+    # slice at a time avoids an additional full-size temporary array, and with
+    # ``scratch`` the result lives in a disk-backed memmap so Patent's 11 GB of
+    # features never has to fit in RAM (np.savez streams from the memmap).
+    if scratch is None:
+        features = np.empty(source.shape, dtype=np.float32)
+    else:
+        features = np.lib.format.open_memmap(
+            scratch, mode="w+", dtype=np.float32, shape=source.shape
+        )
     for t in range(steps):
         current = np.asarray(source[t], dtype=np.float32)
         features[t] = (current - current.mean()) / (current.std() + 1e-6)
+        if not np.isfinite(features[t]).all():
+            raise ValueError(f"{path}: snapshot {t} contains NaN/inf after standardization")
     return features
 
 
@@ -201,11 +213,13 @@ def convert(
     step = OFFICIAL_MERGE_STEPS[dataset] if merge_step is None else merge_step
     increments, timestamps = _merge_snapshots(increments, timestamps, step)
     cumulative = _cumulative_undirected(increments)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    scratch = output.with_name(f".{output.stem}.features.tmp.npy")
     if feature_path is None:
         features = structural_features(cumulative, num_nodes)
         feature_source = "structural-fallback"
     else:
-        features = _load_features(feature_path, len(cumulative), num_nodes)
+        features = _load_features(feature_path, len(cumulative), num_nodes, scratch)
         feature_source = str(feature_path)
     active = np.stack(
         [np.bincount(edge[0], minlength=num_nodes) > 0 for edge in cumulative]
@@ -222,13 +236,18 @@ def convert(
         "feature_source": np.asarray(feature_source),
     }
     payload.update({f"edges_{t}": edge for t, edge in enumerate(cumulative)})
-    output.parent.mkdir(parents=True, exist_ok=True)
-    np.savez_compressed(output, **payload)
+    feature_dim = int(features.shape[-1])
+    try:
+        np.savez_compressed(output, **payload)
+    finally:
+        if isinstance(features, np.memmap):
+            del features, payload["features"]
+            scratch.unlink(missing_ok=True)
     labeled = int((labels >= 0).sum())
     print(
         f"saved {output}: dataset={dataset}, T={len(cumulative)}, N={num_nodes}, "
         f"labeled={labeled}, E_final={cumulative[-1].shape[1] // 2}, "
-        f"F={features.shape[-1]}, merge_step={step}, feature_source={feature_source}"
+        f"F={feature_dim}, merge_step={step}, feature_source={feature_source}"
     )
 
 

@@ -123,6 +123,42 @@ Run all three node-prediction datasets under the same model/probe protocol:
 bash scripts/run_node_datasets.sh
 ```
 
+### Node datasets need SpikeNet DeepWalk features first
+
+The SG-JEPA paper (and SpikeNet, whose DBLP/Tmall/Patent release it uses)
+feeds every model 80-dimensional per-snapshot DeepWalk node features
+(`<dataset>.npy`, shape `[T, N, 80]`). Without them the converters write a 4-D
+structural placeholder and **every** model (SG-JEPA, EvolveGCN, ROLAND, ...)
+collapses to the majority class (DBLP: ~0.05 Macro-F1 / ~0.29 Micro-F1 instead
+of the paper's ~0.74 / ~0.75). `load_npz` now emits a `RuntimeWarning` when an
+archive carries the fallback. Two ways to obtain the features:
+
+1. **Official files** (fastest, exactly what the paper used): SpikeNet's
+   Dropbox folder holds `dblp.npy`; `tmall.npy` and `patent.npy` are on the
+   Aliyun Drive link in the SpikeNet README (rename the downloaded `.txt` to
+   `.npy`). Place them at `data/raw/<dataset>/<dataset>.npy`; expected shapes
+   are `[27, 28085, 80]`, `[19, 577314, 80]` and `[13, 2738012, 80]`
+   (Tmall/Patent snapshots are merged by 10/2 as in the official loader).
+2. **Regenerate** with the official recipe
+   (`DeepWalk(80, 10, 128, window_size=10, negative=1)`, `--normalize` for
+   Tmall/Patent only), resumable and streamed so Patent fits in memory:
+
+   ```bash
+   DATASET=dblp   sbatch generate_node_features.sbatch
+   DATASET=tmall  sbatch generate_node_features.sbatch   # hours
+   DATASET=patent sbatch generate_node_features.sbatch   # ~1 day; SCRATCH_DIR needs ~25 GB
+   ```
+
+   or directly: `python scripts/generate_spikenet_deepwalk.py --dataset tmall`.
+
+Then rebuild the archives (the `.npy` next to the raw data is auto-detected):
+
+```bash
+python scripts/prepare_dblp.py
+python scripts/prepare_spikenet_node.py --dataset tmall
+python scripts/prepare_spikenet_node.py --dataset patent
+```
+
 On the configured Slurm cluster, submit GPU-enforced link or node jobs with:
 
 ```bash

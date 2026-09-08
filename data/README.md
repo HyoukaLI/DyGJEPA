@@ -25,9 +25,33 @@ MOOC uses four-dimensional interaction features and state-change labels.
 LastFM uses two-dimensional interaction features and has no positive
 state-change labels, so its JODIE auxiliary state objective is disabled.
 
-The current local DBLP archive contains the four-dimensional structural
-fallback. Regenerate it with `--features data/raw/dblp/dblp.npy` before a
-paper-aligned SG-JEPA comparison that requires 80-dimensional DeepWalk input.
+## Node archives (DBLP, Tmall, Patent) require DeepWalk features
+
+The SG-JEPA/SpikeNet protocol uses 80-dimensional per-snapshot DeepWalk node
+features, `data/raw/<dataset>/<dataset>.npy` with shape `[T, N, 80]`
+(DBLP `[27, 28085, 80]`, Tmall `[19, 577314, 80]`, Patent
+`[13, 2738012, 80]`). `prepare_dblp.py` and `prepare_spikenet_node.py` pick the
+file up automatically; when it is missing they print a warning and write a 4-D
+structural placeholder, and `load_npz` warns again at run time. That
+placeholder carries no class information: on DBLP a linear probe on it reaches
+4.5 Macro-F1 / 29 Micro-F1 (majority class = 29%), while the same probe on the
+DeepWalk features reaches 66.7 / 66.7. Obtain the features from the SpikeNet
+release (Dropbox for DBLP, Aliyun Drive for Tmall/Patent, rename `.txt` to
+`.npy`) or regenerate them with the official recipe:
+
+```bash
+python scripts/generate_spikenet_deepwalk.py --dataset dblp
+python scripts/generate_spikenet_deepwalk.py --dataset tmall    # --normalize by default
+python scripts/generate_spikenet_deepwalk.py --dataset patent   # --normalize by default
+# or on Slurm: DATASET=patent sbatch generate_node_features.sbatch
+python scripts/prepare_dblp.py
+python scripts/prepare_spikenet_node.py --dataset tmall
+python scripts/prepare_spikenet_node.py --dataset patent
+```
+
+The generator is resumable (`<dataset>.npy.progress.json`) and streams the
+random walks through gensim's `corpus_file` reader; Patent writes ~25 GB of
+walks per snapshot to `--scratch-dir` (default `$TMPDIR`).
 
 ## Homogeneous event conversion
 

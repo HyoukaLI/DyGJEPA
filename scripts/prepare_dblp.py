@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import sys
 from collections import defaultdict
 from pathlib import Path
 
@@ -96,11 +97,34 @@ def main() -> None:
     parser.add_argument("--labels", type=Path, default=Path("data/raw/dblp/node2label.txt"))
     parser.add_argument(
         "--features", type=Path, default=None,
-        help="optional SpikeNet-compatible dblp.npy [27, 28085, 80]",
+        help="SpikeNet-compatible dblp.npy [27, 28085, 80]; defaults to "
+        "<edges dir>/dblp.npy when that file exists",
+    )
+    parser.add_argument(
+        "--structural-features", action="store_true",
+        help="force the 4-D featureless fallback even if dblp.npy exists "
+        "(NOT the paper protocol; every model collapses to the majority class)",
     )
     parser.add_argument("--output", type=Path, default=Path("data/processed/dblp.npz"))
     args = parser.parse_args()
-    convert(args.edges, args.labels, args.output, args.features)
+    if args.structural_features:
+        feature_path = None
+    else:
+        default_features = args.edges.parent / "dblp.npy"
+        feature_path = args.features or (
+            default_features if default_features.is_file() else None
+        )
+        if args.features is not None and not args.features.is_file():
+            parser.error(f"feature file does not exist: {args.features}")
+        if feature_path is None:
+            print(
+                f"WARNING: {default_features} not found; writing the 4-D structural "
+                "fallback. This is NOT the SpikeNet/SG-JEPA protocol: generate the "
+                "DeepWalk features first with scripts/generate_spikenet_deepwalk.py "
+                "--dataset dblp (or download SpikeNet's dblp.npy).",
+                file=sys.stderr,
+            )
+    convert(args.edges, args.labels, args.output, feature_path)
 
 
 if __name__ == "__main__":

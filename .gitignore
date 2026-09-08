@@ -9,6 +9,7 @@ runs/
 data/raw/
 data/processed/tmall.npz
 data/processed/patent.npz
+data/processed/dblp.npz
 logs/
 results/
 ara-output/
