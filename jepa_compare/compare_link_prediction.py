@@ -14,7 +14,12 @@ import yaml
 from .data import load_npz, make_synthetic
 from .dyglib_baselines import DyGLibLinkBaseline, EdgeBankLinkBaseline
 from .jodie_baseline import JODIELinkBaseline
-from .link_prediction import TemporalWindowSplit, temporal_window_split
+from .link_prediction import (
+    TemporalWindowSplit,
+    negative_edge_table_from_snapshots,
+    temporal_window_split,
+)
+from .negative_edges import NegativeEdgeTable, normalize_negative_strategy
 from .rcps_jepa import RCPSJEPA
 from .snapshot_ssl_baselines import (
     CLDGLinkBaseline,
@@ -61,6 +66,75 @@ def _negative_destination_pool(graph) -> torch.Tensor:
     return torch.unique(torch.cat(destinations), sorted=True)
 
 
+def _negative_strategy(config: dict) -> str:
+    """Read ``link.negative_strategy`` (default: DyGLib random negatives)."""
+    return normalize_negative_strategy(
+        dict(config.get("link", {})).get("negative_strategy", "random")
+    )
+
+
+def _with_strategy_suffix(path: str | Path, strategy: str) -> str:
+    """Keep historical/inductive result files apart from the random ones."""
+    path = Path(path)
+    if strategy == "random":
+        return str(path)
+    return str(path.with_name(f"{path.stem}_{strategy}{path.suffix}"))
+
+
+def _build_negative_edge_table(
+    graph, split: TemporalWindowSplit, link_cfg: dict, config: dict, strategy: str
+) -> NegativeEdgeTable | None:
+    """DyGLib historical/inductive negatives shared by every compared method.
+
+    Mirrors ``evaluate_link_prediction.py``: the sampler sees the complete
+    stream, validation uses seed 0 and test seed 2, batches hold
+    ``eval_positive_batch_size`` consecutive positives, and models are still
+    trained/selected with random negatives (``train_link_prediction.py``).
+    """
+    if strategy == "random":
+        return None
+    if (
+        float(link_cfg.get("negative_ratio", 1.0)) != 1.0
+        or link_cfg.get("max_positive_pairs") is not None
+        or bool(link_cfg.get("new_edges_only", False))
+        or bool(link_cfg.get("undirected", False))
+        or link_cfg.get("eval_positive_batch_size") is None
+    ):
+        raise ValueError(
+            f"link.negative_strategy={strategy} follows DyGLib's protocol and "
+            "needs negative_ratio=1.0, max_positive_pairs=null, "
+            "new_edges_only=false, undirected=false and eval_positive_batch_size"
+        )
+    shared_training = dict(config.get("training", {}))
+    seeds = {
+        "validation": int(shared_training.get("validation_query_seed", 0)),
+        "test": int(shared_training.get("test_query_seed", 2)),
+    }
+    for section_name, section in config.items():
+        if not (section_name.endswith("_training") and isinstance(section, dict)):
+            continue
+        for key, split_name in (
+            ("validation_query_seed", "validation"),
+            ("test_query_seed", "test"),
+        ):
+            if key in section and int(section[key]) != seeds[split_name]:
+                raise ValueError(
+                    f"{section_name}.{key} differs from training.{key}; "
+                    f"{strategy} negatives are sampled once and shared by every model"
+                )
+    return negative_edge_table_from_snapshots(
+        graph.snapshots,
+        {
+            "validation": unique_snapshots(split.validation, targets_only=True),
+            "test": unique_snapshots(split.test, targets_only=True),
+        },
+        seeds,
+        strategy=strategy,
+        batch_size=int(link_cfg["eval_positive_batch_size"]),
+        bipartite_source_count=graph.num_source_nodes,
+    )
+
+
 def _target_event_count(windows: list[list]) -> int | None:
     """Count raw target events, or return None for structural-only snapshots."""
     targets = unique_snapshots(windows, targets_only=True)
@@ -105,10 +179,20 @@ def _train_one(
     split: TemporalWindowSplit,
     training: dict,
     seed: int,
+    negative_edge_table: NegativeEdgeTable | None = None,
 ) -> tuple[dict[str, float], dict[str, float]]:
-    """Train one model, mirroring its epochs into a wandb run when enabled."""
+    """Train one model, mirroring its epochs into a wandb run when enabled.
+
+    ``negative_edge_table`` (DyGLib historical/inductive negatives) is used
+    only for the final validation/test pass of the selected checkpoint; the
+    per-epoch validation that picks the checkpoint keeps random negatives,
+    exactly as DyGLib trains with ``train_link_prediction.py`` and then
+    re-evaluates with ``evaluate_link_prediction.py``.
+    """
     with wandb_logging.run_for_model(name, seed, {"training": training}) as wb_run:
-        return _train_one_inner(name, model, split, training, seed, wb_run)
+        return _train_one_inner(
+            name, model, split, training, seed, wb_run, negative_edge_table
+        )
 
 
 def _train_one_inner(
@@ -118,6 +202,7 @@ def _train_one_inner(
     training: dict,
     seed: int,
     wb_run,
+    negative_edge_table: NegativeEdgeTable | None = None,
 ) -> tuple[dict[str, float], dict[str, float]]:
     native_jodie = isinstance(model, JODIELinkBaseline)
     native_event_model = isinstance(
@@ -274,6 +359,8 @@ def _train_one_inner(
         raise RuntimeError(f"{name} did not produce a validation checkpoint")
     model.load_state_dict(best_state)
     model.eval()
+    if negative_edge_table is not None:
+        model.negative_edge_table = negative_edge_table
     validation = evaluate(
         split.validation, split.train, validation_query_seed
     )
@@ -299,11 +386,12 @@ def _train_snapshot_ssl_one(
     split: TemporalWindowSplit,
     training: dict,
     seed: int,
+    negative_edge_table: NegativeEdgeTable | None = None,
 ) -> tuple[dict[str, float], dict[str, float | str]]:
     """Run native SSL pretraining followed by a shared frozen link probe."""
     with wandb_logging.run_for_model(name, seed, {"training": training}) as wb_run:
         return _train_snapshot_ssl_one_inner(
-            name, model, split, training, seed, wb_run
+            name, model, split, training, seed, wb_run, negative_edge_table
         )
 
 
@@ -314,6 +402,7 @@ def _train_snapshot_ssl_one_inner(
     training: dict,
     seed: int,
     wb_run,
+    negative_edge_table: NegativeEdgeTable | None = None,
 ) -> tuple[dict[str, float], dict[str, float | str]]:
     """Pretrain, then fit the frozen probe, logging both stages separately."""
     pretrain_optimizer = torch.optim.Adam(
@@ -399,6 +488,8 @@ def _train_snapshot_ssl_one_inner(
         raise RuntimeError(f"{name} did not produce a frozen-probe checkpoint")
     model.probe.load_state_dict(best_probe_state)
     model.eval()
+    if negative_edge_table is not None:
+        model.negative_edge_table = negative_edge_table
     validation = model.evaluate_windows(
         split.validation,
         pair_batch_size=pair_batch_size,
@@ -481,6 +572,13 @@ def run(config: dict) -> dict[str, dict[str, dict[str, float]]]:
         float(split_cfg.get("validation_ratio", 0.2)),
     )
     link_cfg = dict(config.get("link", {}))
+    # The evaluation negative strategy is a driver-level protocol switch, not a
+    # model constructor argument: models are always trained and checkpointed
+    # with random negatives (DyGLib train_link_prediction.py); a historical
+    # table only replaces the negatives of the final validation/test pass.
+    negative_strategy = normalize_negative_strategy(
+        link_cfg.pop("negative_strategy", "random")
+    )
     link_cfg["negative_destination_candidates"] = _negative_destination_pool(graph)
     configured = link_cfg.get("bipartite_source_count")
     if configured is not None and (
@@ -491,6 +589,19 @@ def run(config: dict) -> dict[str, dict[str, dict[str, float]]]:
     # Keep this key present for both graph types. Snapshot SSL baselines use
     # None to select homogeneous negative sampling.
     link_cfg["bipartite_source_count"] = graph.num_source_nodes
+    negative_edge_table = _build_negative_edge_table(
+        graph, split, link_cfg, config, negative_strategy
+    )
+    if negative_edge_table is not None:
+        print(
+            json.dumps(
+                {
+                    "negative_strategy": negative_strategy,
+                    "negative_edges": negative_edge_table.summary,
+                }
+            ),
+            flush=True,
+        )
     rcps_args = {
         "num_nodes": graph.num_nodes,
         **common,
@@ -531,7 +642,7 @@ def run(config: dict) -> dict[str, dict[str, dict[str, float]]]:
             graph.snapshots, JODIELinkBaseline._unique_snapshots(split.train)
         )
         jodie_validation, jodie_test = _train_one(
-            "jodie", jodie_model, split, jodie_training, seed
+            "jodie", jodie_model, split, jodie_training, seed, negative_edge_table
         )
         result["jodie"] = {"validation": jodie_validation, "test": jodie_test}
         del jodie_model
@@ -544,7 +655,7 @@ def run(config: dict) -> dict[str, dict[str, dict[str, float]]]:
         ).to(device)
         tgat_model.prepare_streams(graph.snapshots, train_snapshots)
         tgat_validation, tgat_test = _train_one(
-            "tgat", tgat_model, split, tgat_training, seed
+            "tgat", tgat_model, split, tgat_training, seed, negative_edge_table
         )
         result["tgat"] = {"validation": tgat_validation, "test": tgat_test}
         del tgat_model
@@ -573,6 +684,8 @@ def run(config: dict) -> dict[str, dict[str, dict[str, float]]]:
             **link_cfg,
         ).to(device)
         edge_bank.eval()
+        if negative_edge_table is not None:
+            edge_bank.negative_edge_table = negative_edge_table
         edge_validation = edge_bank.evaluate_protocol(
             split.validation,
             split.train,
@@ -608,7 +721,12 @@ def run(config: dict) -> dict[str, dict[str, dict[str, float]]]:
             **dict(config.get(f"{baseline_name}_training", {})),
         }
         baseline_validation, baseline_test = _train_one(
-            baseline_name, baseline_model, split, baseline_training, seed
+            baseline_name,
+            baseline_model,
+            split,
+            baseline_training,
+            seed,
+            negative_edge_table,
         )
         result[baseline_name] = {
             "validation": baseline_validation,
@@ -649,7 +767,12 @@ def run(config: dict) -> dict[str, dict[str, dict[str, float]]]:
             **dict(config.get(f"{baseline_name}_training", {})),
         }
         baseline_validation, baseline_test = _train_snapshot_ssl_one(
-            baseline_name, baseline_model, split, baseline_training, seed
+            baseline_name,
+            baseline_model,
+            split,
+            baseline_training,
+            seed,
+            negative_edge_table,
         )
         result[baseline_name] = {
             "validation": baseline_validation,
@@ -663,7 +786,7 @@ def run(config: dict) -> dict[str, dict[str, dict[str, float]]]:
         rcps_model = RCPSJEPA(feature_dim=graph.feature_dim, **rcps_args).to(device)
         rcps_model.prepare_causal_history(graph.snapshots)
         rcps_validation, rcps_test = _train_one(
-            "rcps_jepa", rcps_model, split, rcps_training, seed
+            "rcps_jepa", rcps_model, split, rcps_training, seed, negative_edge_table
         )
         result["rcps_jepa"] = {"validation": rcps_validation, "test": rcps_test}
         del rcps_model
@@ -688,6 +811,37 @@ def _deep_update(target: dict, updates: dict) -> dict:
         else:
             target[key] = deepcopy(value)
     return target
+
+
+def load_config(path: Path, _seen: tuple[Path, ...] = ()) -> dict:
+    """Load a YAML config, resolving an optional ``base_config`` overlay.
+
+    ``base_config`` names another config whose values are inherited; the
+    overlay's own keys are deep-merged on top (mappings merge, anything else,
+    including the ``datasets`` list, is replaced).  A relative path is resolved
+    against the overlay's directory first and the working directory second.
+    This keeps protocol variants such as ``link_comparison_all_historical.yaml``
+    in their own file while tracking the tuned settings of the base config.
+    """
+    path = Path(path)
+    resolved = path.resolve()
+    if resolved in _seen:
+        raise ValueError(f"base_config cycle at {path}")
+    with path.open() as handle:
+        overlay = yaml.safe_load(handle) or {}
+    if not isinstance(overlay, dict):
+        raise ValueError(f"{path} must contain a mapping")
+    base_name = overlay.pop("base_config", None)
+    if base_name is None:
+        return overlay
+    candidate = Path(base_name)
+    if not candidate.is_absolute():
+        sibling = path.parent / candidate
+        candidate = sibling if sibling.exists() else candidate
+    if not candidate.exists():
+        raise FileNotFoundError(f"{path}: base_config {base_name!r} not found")
+    base = load_config(candidate, _seen + (resolved,))
+    return _deep_update(base, overlay)
 
 
 def _seed_values(config: dict) -> list[int]:
@@ -774,6 +928,9 @@ def _dataset_configs(config: dict) -> list[tuple[str, dict]]:
             "output_name needs exactly one dataset; "
             f"got {len(entries)} - narrow the run with --datasets"
         )
+    # Historical/inductive runs write ``<stem>_<strategy>.json`` so they never
+    # overwrite the random-negative results of the same dataset.
+    negative_strategy = _negative_strategy(base)
     expanded: list[tuple[str, dict]] = []
     seen: set[str] = set()
     # JODIE consumes the original event width. TGAT and all DyGLib backbones,
@@ -802,7 +959,9 @@ def _dataset_configs(config: dict) -> list[tuple[str, dict]]:
         current["dataset_name"] = name
         current["data"] = {**dict(current.get("data", {})), "path": str(path)}
         stem = output_name or f"link_comparison_{name}"
-        current["output_path"] = str(output_dir / f"{stem}.json")
+        current["output_path"] = _with_strategy_suffix(
+            output_dir / f"{stem}.json", negative_strategy
+        )
         if dataset_models is not None:
             allowed = [str(model).lower() for model in dataset_models]
             globally_requested = current.get("models")
@@ -871,8 +1030,7 @@ def main() -> None:
     )
     wandb_logging.add_cli_arguments(parser)
     args = parser.parse_args()
-    with args.config.open() as handle:
-        config = yaml.safe_load(handle)
+    config = load_config(args.config)
     wandb_logging.apply_cli_overrides(config, args)
     if args.seeds is not None:
         config["seed"] = args.seeds[0] if len(args.seeds) == 1 else args.seeds
@@ -940,6 +1098,13 @@ def main() -> None:
             settings = config.setdefault(f"{model_name}_training", {})
             settings["pretrain_epochs"] = args.epochs
             settings["probe_epochs"] = args.epochs
+    negative_strategy = _negative_strategy(config)
+    if negative_strategy != "random":
+        # Validate the switch before any training starts, and keep the result
+        # files of non-random protocols apart from the random ones.
+        for key in ("output_path", "summary_output_path"):
+            if config.get(key):
+                config[key] = _with_strategy_suffix(config[key], negative_strategy)
     seeds = _seed_values(config)
     dataset_results = {}
     for dataset_name, dataset_config in _dataset_configs(config):
@@ -981,6 +1146,8 @@ def main() -> None:
             "runs": runs,
             "aggregate": _aggregate_seed_runs(runs),
         }
+        if negative_strategy != "random":
+            dataset_summary["negative_strategy"] = negative_strategy
         base_output.parent.mkdir(parents=True, exist_ok=True)
         base_output.write_text(json.dumps(dataset_summary, indent=2))
         dataset_results[dataset_name] = dataset_summary

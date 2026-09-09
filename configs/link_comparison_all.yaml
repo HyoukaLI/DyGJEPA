@@ -411,6 +411,17 @@ link:
   eval_positive_batch_size: 200
   new_edges_only: false
   undirected: false
+  # Evaluation negative strategy, as in DyGLib evaluate_link_prediction.py.
+  #   random     - the protocol above (default).
+  #   historical - Poursafaei et al. 2022: each negative is an edge observed
+  #                before the 200-event batch but absent from it, with both
+  #                endpoints replaced; a pool shorter than the batch is filled
+  #                with random (source, destination) pairs.  Training and
+  #                checkpoint selection keep random negatives; only the final
+  #                validation/test pass scores one shared pre-sampled table
+  #                (validation seed 0, test seed 2).  Results are written to
+  #                *_historical.json so random results are never overwritten.
+  negative_strategy: random
 
 # Shared evaluation/checkpoint cadence only. Optimizer settings are intentionally
 # model-specific; they are not part of the common comparison protocol.

@@ -2,12 +2,19 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import math
-from typing import Sequence
+from typing import Mapping, Sequence
 
+import numpy as np
 import torch
 from torch import Tensor
 
 from .data import Snapshot
+from .negative_edges import (
+    NegativeEdgeTable,
+    SnapshotNegativeEdges,
+    build_negative_edge_table,
+    normalize_negative_strategy,
+)
 
 
 PAIR_STAT_DIM = 8
@@ -105,6 +112,7 @@ def sample_link_queries(
     bipartite_source_count: int | None = None,
     negative_destination_candidates: Tensor | None = None,
     allow_negative_collisions: bool = False,
+    negative_edges: NegativeEdgeTable | None = None,
 ) -> LinkQueries:
     """Sample deterministic positive and negative candidate links.
 
@@ -116,6 +124,12 @@ def sample_link_queries(
     For cumulative snapshot datasets, ``new_edges_only`` removes edges already
     present in the final context snapshot. If no new edge exists, the function
     falls back to all target edges so small smoke-test graphs remain usable.
+
+    ``negative_edges`` switches evaluation targets to DyGLib's historical (or
+    other non-random) protocol: the table supplies one pre-sampled ``(source,
+    destination)`` negative per raw event and the random destination
+    corruption below is bypassed.  Snapshots the table marks as ``None``
+    (training targets) keep the random protocol.
     """
     device = target.edge_index.device
     num_nodes = target.x.shape[0]
@@ -172,6 +186,22 @@ def sample_link_queries(
             positive_timestamps = positive_timestamps[keep]
     if positives.numel() == 0:
         raise ValueError("target snapshot has no positive link candidates")
+
+    table_entry = (
+        None if negative_edges is None else negative_edges.for_snapshot(target.time)
+    )
+    if table_entry is not None:
+        return _table_link_queries(
+            positives,
+            positive_timestamps,
+            table_entry,
+            strategy=negative_edges.strategy,
+            negative_ratio=negative_ratio,
+            max_positive=max_positive,
+            new_edges_only=new_edges_only,
+            undirected=undirected,
+            seed=seed,
+        )
 
     generator = torch.Generator().manual_seed(seed)
     if max_positive is not None and positives.shape[0] > max_positive:
@@ -249,6 +279,133 @@ def sample_link_queries(
     order = torch.randperm(pairs.shape[0], generator=generator).to(device)
     return LinkQueries(
         pairs[order], labels[order], group_ids[order], timestamps[order]
+    )
+
+
+def _table_link_queries(
+    positives: Tensor,
+    positive_timestamps: Tensor,
+    entry: SnapshotNegativeEdges,
+    *,
+    strategy: str,
+    negative_ratio: float,
+    max_positive: int | None,
+    new_edges_only: bool,
+    undirected: bool,
+    seed: int,
+) -> LinkQueries:
+    """Pair every raw positive with its pre-sampled DyGLib negative edge."""
+    if negative_ratio != 1.0 or max_positive is not None or new_edges_only or undirected:
+        raise ValueError(
+            f"{strategy} negative sampling follows DyGLib's protocol: one "
+            "negative per raw directed event (negative_ratio=1.0, "
+            "max_positive_pairs=None, new_edges_only=False, undirected=False)"
+        )
+    device = positives.device
+    entry.check_alignment(
+        positives[:, 0].detach().cpu().numpy(),
+        positives[:, 1].detach().cpu().numpy(),
+        context=f"{strategy} negative sampling",
+    )
+    negatives = torch.stack(
+        [
+            torch.as_tensor(entry.sources, dtype=torch.long),
+            torch.as_tensor(entry.destinations, dtype=torch.long),
+        ],
+        dim=-1,
+    ).to(device)
+    positive_count = positives.shape[0]
+    pairs = torch.cat([positives, negatives], dim=0)
+    labels = torch.cat(
+        [
+            torch.ones(positive_count, device=device),
+            torch.zeros(positive_count, device=device),
+        ]
+    )
+    groups = torch.arange(positive_count, dtype=torch.long, device=device)
+    group_ids = torch.cat([groups, groups])
+    # DyGLib scores the i-th negative at the i-th positive's timestamp.
+    timestamps = torch.cat([positive_timestamps, positive_timestamps], dim=0)
+    generator = torch.Generator().manual_seed(seed)
+    order = torch.randperm(pairs.shape[0], generator=generator).to(device)
+    return LinkQueries(
+        pairs[order], labels[order], group_ids[order], timestamps[order]
+    )
+
+
+def snapshot_event_arrays(
+    snapshot: Snapshot,
+    *,
+    bipartite_source_count: int | None,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Return the raw ``(sources, destinations, timestamps)`` of a snapshot.
+
+    Raises when any event would be dropped by the evaluators' bipartite
+    partition filter, so a negative edge table built from these arrays lines
+    up one-to-one with what every method scores.
+    """
+    if snapshot.query_edge_index is None:
+        raise ValueError(
+            f"snapshot {snapshot.time} has no query_edge_index; non-random "
+            "negative sampling requires the raw event stream"
+        )
+    sources, destinations = snapshot.query_edge_index.detach().cpu().numpy()
+    num_nodes = int(snapshot.x.shape[0])
+    if bipartite_source_count is not None:
+        valid = (sources < bipartite_source_count) & (
+            destinations >= bipartite_source_count
+        ) & (destinations < num_nodes)
+    else:
+        valid = (
+            (sources >= 0)
+            & (sources < num_nodes)
+            & (destinations >= 0)
+            & (destinations < num_nodes)
+        )
+    if not bool(np.all(valid)):
+        raise ValueError(
+            f"snapshot {snapshot.time} contains events outside the query node "
+            "partition; the negative edge table requires every event to be a "
+            "valid positive"
+        )
+    if snapshot.query_timestamps is None:
+        timestamps = np.full(sources.shape[0], float(snapshot.time), dtype=np.float64)
+    else:
+        timestamps = (
+            snapshot.query_timestamps.detach().cpu().numpy().astype(np.float64)
+        )
+    return sources.astype(np.int64), destinations.astype(np.int64), timestamps
+
+
+def negative_edge_table_from_snapshots(
+    snapshots: Sequence[Snapshot],
+    evaluation_targets: Mapping[str, Sequence[Snapshot]],
+    seeds: Mapping[str, int],
+    *,
+    strategy: str,
+    batch_size: int,
+    bipartite_source_count: int | None,
+) -> NegativeEdgeTable | None:
+    """Build DyGLib evaluation negatives for the validation/test target snapshots.
+
+    ``snapshots`` is the complete graph (DyGLib's ``full_data``);
+    ``evaluation_targets`` maps split names to their target snapshots.
+    Returns ``None`` for the random strategy, whose negatives are still drawn
+    on the fly by each evaluator.
+    """
+    strategy = normalize_negative_strategy(strategy)
+    if strategy == "random":
+        return None
+    streams = [
+        (int(snapshot.time), *snapshot_event_arrays(snapshot, bipartite_source_count=bipartite_source_count))
+        for snapshot in snapshots
+    ]
+    targets = {
+        name: [int(snapshot.time) for snapshot in split_targets]
+        for name, split_targets in evaluation_targets.items()
+    }
+    return build_negative_edge_table(
+        streams, targets, dict(seeds), strategy=strategy, batch_size=batch_size
     )
 
 

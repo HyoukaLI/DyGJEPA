@@ -88,6 +88,35 @@ RCPS-JEPA may use multiple random destinations per positive during training as
 a model-specific hyperparameter; validation and test always retain the shared
 one-positive/one-negative protocol.
 
+### Historical negative sampling (separate run)
+
+DyGLib's historical negatives (Poursafaei et al., 2022;
+`evaluate_link_prediction.py --negative_sample_strategy historical`) are a
+separate run with their own config, launcher and Slurm script, so they never
+touch the random-negative results:
+
+```bash
+bash scripts/run_link_datasets_historical.sh              # all datasets
+bash scripts/run_link_datasets_historical.sh canparl uci  # a subset
+sbatch run_link_datasets_historical.sbatch                # cluster; DATASET_NAMES/MODELS/SEEDS/EPOCHS as usual
+```
+
+`configs/link_comparison_all_historical.yaml` is an overlay
+(`base_config: link_comparison_all.yaml`): every dataset entry, model setting
+and optimizer recipe is inherited from the random config, and only
+`link.negative_strategy: historical` plus the result location differ, so
+tuning done in `link_comparison_all.yaml` carries over. Training and
+checkpoint selection still use random negatives; the final validation/test
+pass of every model then scores one shared pre-sampled historical negative per
+event (an edge observed before the 200-event batch but absent from it, both
+endpoints replaced, random pairs filling short pools, validation seed 0 / test
+seed 2). Results go to `results/historical/*_historical.json` and
+`results/historical/link_comparison_all_historical.json`. EdgeBank keeps the
+configured `edgebank.memory_mode`; DyGLib's strategy-specific EdgeBank memory
+modes are not reproduced. Setting `link.negative_strategy: historical`
+directly in any config has the same effect and suffixes its result files with
+`_historical`.
+
 Each model is reinitialized independently for every seed. To override the seed list:
 
 ```bash

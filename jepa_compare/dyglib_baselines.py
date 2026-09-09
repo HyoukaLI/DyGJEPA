@@ -498,7 +498,12 @@ class DyGLibLinkBaseline(nn.Module, SharedLinkProtocol):
         history_windows: Sequence[Sequence[Snapshot]],
         query_seed: int,
     ) -> dict[str, float]:
-        """Mirror DyGLib's batched random-negative evaluator."""
+        """Mirror DyGLib's batched evaluator.
+
+        Negatives are DyGLib random destinations unless a historical/inductive
+        ``negative_edge_table`` is attached, in which case both endpoints of
+        every negative come from the table (as in ``evaluate_link_prediction.py``).
+        """
         if self._full_sampler is None or self._full_destinations is None:
             raise RuntimeError("call prepare_streams before evaluation")
         self._set_sampler(self._full_sampler)
@@ -511,11 +516,20 @@ class DyGLibLinkBaseline(nn.Module, SharedLinkProtocol):
             ]
             self._advance_memory(_concatenate(history, self.dimension))
 
-        targets = [
-            self._snapshot_streams[item.time]
-            for item in unique_snapshots(windows, targets_only=True)
-        ]
+        target_snapshots = unique_snapshots(windows, targets_only=True)
+        targets = [self._snapshot_streams[item.time] for item in target_snapshots]
         stream = _concatenate(targets, self.dimension)
+        table_negatives = None
+        if self.negative_edge_table is not None:
+            table_negatives = self.negative_edge_table.for_snapshots(
+                [item.time for item in target_snapshots]
+            )
+            # DyGLib reserves id zero, so the adapter's stream is shifted by one.
+            table_negatives.check_alignment(
+                stream.sources - 1,
+                stream.destinations - 1,
+                context=f"{self.model_name} evaluation",
+            )
         rng = np.random.RandomState(query_seed)
         score_parts: list[Tensor] = []
         label_parts: list[Tensor] = []
@@ -523,21 +537,27 @@ class DyGLibLinkBaseline(nn.Module, SharedLinkProtocol):
         group_offset = 0
         for start in range(0, len(stream), self.eval_pair_batch_size):
             batch = stream.take(slice(start, start + self.eval_pair_batch_size))
-            negatives = rng.choice(
-                self._full_destinations, size=len(batch), replace=True
-            ).astype(np.int64)
-            if not self.allow_negative_collisions:
-                collision = negatives == batch.destinations
-                while collision.any() and self._full_destinations.size > 1:
-                    negatives[collision] = rng.choice(
-                        self._full_destinations,
-                        size=int(collision.sum()),
-                        replace=True,
-                    )
+            if table_negatives is None:
+                negative_sources = batch.sources
+                negatives = rng.choice(
+                    self._full_destinations, size=len(batch), replace=True
+                ).astype(np.int64)
+                if not self.allow_negative_collisions:
                     collision = negatives == batch.destinations
+                    while collision.any() and self._full_destinations.size > 1:
+                        negatives[collision] = rng.choice(
+                            self._full_destinations,
+                            size=int(collision.sum()),
+                            replace=True,
+                        )
+                        collision = negatives == batch.destinations
+            else:
+                rows = slice(start, start + len(batch))
+                negative_sources = table_negatives.sources[rows] + 1
+                negatives = table_negatives.destinations[rows] + 1
             if self.is_memory_model:
                 negative_source, negative_destination = self._embeddings(
-                    batch.sources, negatives, batch.timestamps, positive=False
+                    negative_sources, negatives, batch.timestamps, positive=False
                 )
                 positive_source, positive_destination = self._embeddings(
                     batch.sources,
@@ -551,7 +571,7 @@ class DyGLibLinkBaseline(nn.Module, SharedLinkProtocol):
                     batch.sources, batch.destinations, batch.timestamps
                 )
                 negative_source, negative_destination = self._embeddings(
-                    batch.sources, negatives, batch.timestamps
+                    negative_sources, negatives, batch.timestamps
                 )
             positive_scores = torch.sigmoid(
                 predictor(
@@ -778,6 +798,14 @@ class EdgeBankLinkBaseline(nn.Module, SharedLinkProtocol):
                     sorted=True,
                 )
             pool_array = pool.detach().cpu().numpy().astype(np.int64)
+            table_negatives = None
+            if self.negative_edge_table is not None:
+                table_negatives = self.negative_edge_table.for_snapshots(
+                    [snapshot.time for snapshot in target_snapshots]
+                )
+                table_negatives.check_alignment(
+                    target_sources, target_destinations, context="EdgeBank evaluation"
+                )
             rng = np.random.RandomState(query_seed)
             scores: list[Tensor] = []
             labels: list[Tensor] = []
@@ -801,12 +829,20 @@ class EdgeBankLinkBaseline(nn.Module, SharedLinkProtocol):
                 )
                 source = target_sources[start:stop]
                 positive = target_destinations[start:stop]
-                negative = rng.choice(pool_array, size=len(source), replace=True)
+                if table_negatives is None:
+                    negative_source = source
+                    negative = rng.choice(pool_array, size=len(source), replace=True)
+                else:
+                    negative_source = table_negatives.sources[start:stop]
+                    negative = table_negatives.destinations[start:stop]
                 positive_scores = torch.tensor(
                     [float((int(u), int(v)) in seen) for u, v in zip(source, positive)]
                 )
                 negative_scores = torch.tensor(
-                    [float((int(u), int(v)) in seen) for u, v in zip(source, negative)]
+                    [
+                        float((int(u), int(v)) in seen)
+                        for u, v in zip(negative_source, negative)
+                    ]
                 )
                 scores.extend([positive_scores, negative_scores])
                 labels.extend(

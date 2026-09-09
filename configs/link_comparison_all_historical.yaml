@@ -1,0 +1,31 @@
+# Historical negative sampling (Poursafaei et al., NeurIPS 2022) for the link
+# comparison, run separately from the random-negative protocol.
+#
+# This file is an overlay: every dataset entry, model setting and optimizer
+# recipe is inherited from link_comparison_all.yaml, so tuning done there is
+# picked up here automatically.  Only the evaluation negatives and the result
+# location change.  Launch with
+#
+#   bash scripts/run_link_datasets_historical.sh [datasets...]
+#   sbatch run_link_datasets_historical.sbatch
+#
+# Protocol, as in DyGLib evaluate_link_prediction.py --negative_sample_strategy
+# historical: models are trained and their checkpoints selected with random
+# negatives exactly as in the base run; the final validation/test pass of the
+# selected checkpoint then scores one shared pre-sampled historical negative per
+# event (an edge observed before the 200-event batch but absent from it, both
+# endpoints replaced, random pairs filling a short pool; validation seed 0,
+# test seed 2).  EdgeBank keeps edgebank.memory_mode from the base config.
+base_config: link_comparison_all.yaml
+
+link:
+  negative_strategy: historical
+
+# Separate result tree; the driver additionally suffixes every file with
+# _historical, e.g. results/historical/link_comparison_canparl_historical.json
+# and results/historical/link_comparison_all_historical.json.
+output_dir: results/historical
+summary_output_path: results/historical/link_comparison_all.json
+
+wandb:
+  tags: [historical]

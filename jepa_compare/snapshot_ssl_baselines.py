@@ -25,6 +25,7 @@ from .link_prediction import (
     link_prediction_metrics,
     sample_link_queries,
 )
+from .negative_edges import NegativeEdgeTable
 from .temporal_event_utils import seeded_torch_generator
 
 
@@ -204,6 +205,9 @@ def _subsample_rows(rows: Tensor, count: int, seed: int) -> Tensor:
 
 class SnapshotSSLLinkBaseline(nn.Module, ABC):
     implementation: str = "paper_reimplementation"
+    # DyGLib historical/inductive evaluation negatives, attached by the
+    # comparison driver for the final validation/test pass only.
+    negative_edge_table: NegativeEdgeTable | None = None
 
     def __init__(
         self,
@@ -270,6 +274,7 @@ class SnapshotSSLLinkBaseline(nn.Module, ABC):
             bipartite_source_count=self.bipartite_source_count,
             negative_destination_candidates=self.negative_destination_candidates,
             allow_negative_collisions=self.allow_negative_collisions,
+            negative_edges=self.negative_edge_table,
         )
 
     def train_probe_epoch(

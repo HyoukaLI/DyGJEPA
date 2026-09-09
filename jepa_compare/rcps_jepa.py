@@ -22,6 +22,7 @@ from .link_prediction import (
     temporal_pair_increments,
     temporal_node_increments,
 )
+from .negative_edges import NegativeEdgeTable
 from .signature import signature_dimension, truncated_signature
 
 
@@ -165,6 +166,10 @@ class RCPSJEPA(nn.Module):
     document; exact event timestamps can later replace snapshot times without
     changing the JEPA or survival heads.
     """
+
+    # DyGLib historical/inductive evaluation negatives, attached by the
+    # comparison driver for the final validation/test pass only.
+    negative_edge_table: NegativeEdgeTable | None = None
 
     def __init__(
         self,
@@ -971,6 +976,7 @@ class RCPSJEPA(nn.Module):
             bipartite_source_count=self.bipartite_source_count,
             negative_destination_candidates=self.negative_destination_candidates,
             allow_negative_collisions=self.allow_negative_collisions,
+            negative_edges=self.negative_edge_table,
         )
 
     def _node_predictions(

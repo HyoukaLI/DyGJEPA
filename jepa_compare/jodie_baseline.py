@@ -13,6 +13,7 @@ from .link_prediction import (
     link_prediction_metrics,
     sample_link_queries,
 )
+from .negative_edges import NegativeEdgeTable
 
 
 @dataclass
@@ -33,6 +34,10 @@ class JODIELinkBaseline(nn.Module):
     comparison suite still controls the temporal split, sampled candidates,
     metrics, and validation checkpoint rule for both methods.
     """
+
+    # DyGLib historical/inductive evaluation negatives, attached by the
+    # comparison driver for the final validation/test pass only.
+    negative_edge_table: NegativeEdgeTable | None = None
 
     def __init__(
         self,
@@ -118,6 +123,7 @@ class JODIELinkBaseline(nn.Module):
             bipartite_source_count=self.num_users,
             negative_destination_candidates=self.negative_destination_candidates,
             allow_negative_collisions=self.allow_negative_collisions,
+            negative_edges=self.negative_edge_table,
         )
 
     @staticmethod
@@ -572,9 +578,28 @@ class JODIELinkBaseline(nn.Module):
                     group = queued.pop(0)
                     rows = torch.tensor(rows_by_group[group], dtype=torch.long, device=device)
                     candidate_items = queries.pairs[rows, 1] - self.num_users
-                    probabilities.append(
-                        self._score_candidates(state, user, candidate_items, timestamp)
-                    )
+                    candidate_users = queries.pairs[rows, 0]
+                    if bool((candidate_users == int(user)).all()):
+                        probabilities.append(
+                            self._score_candidates(state, user, candidate_items, timestamp)
+                        )
+                    else:
+                        # Historical/inductive negatives carry their own user:
+                        # project that user's state to ``timestamp`` and score
+                        # its distance to the negative item, row by row.
+                        probabilities.append(
+                            torch.cat(
+                                [
+                                    self._score_candidates(
+                                        state,
+                                        candidate_users[row],
+                                        candidate_items[row : row + 1],
+                                        timestamp,
+                                    )
+                                    for row in range(rows.numel())
+                                ]
+                            )
+                        )
                     labels.append(queries.labels[rows])
                     groups.append(
                         torch.full(

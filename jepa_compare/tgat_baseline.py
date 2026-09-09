@@ -309,6 +309,22 @@ class TGATLinkBaseline(nn.Module, SharedLinkProtocol):
                     self._full_stream.destinations.detach().cpu(), sorted=True
                 )
             negative_pool = negative_pool.to(stream.destinations.device)
+            table_sources = table_destinations = None
+            if self.negative_edge_table is not None:
+                table_negatives = self.negative_edge_table.for_snapshots(
+                    [snapshot.time for snapshot in snapshots]
+                )
+                table_negatives.check_alignment(
+                    stream.sources.detach().cpu().numpy(),
+                    stream.destinations.detach().cpu().numpy(),
+                    context="TGAT evaluation",
+                )
+                table_sources = torch.as_tensor(
+                    table_negatives.sources, dtype=stream.sources.dtype
+                ).to(stream.sources.device)
+                table_destinations = torch.as_tensor(
+                    table_negatives.destinations, dtype=stream.destinations.dtype
+                ).to(stream.destinations.device)
             negative_rng, random_device = seeded_torch_generator(
                 stream.destinations.device, query_seed
             )
@@ -323,18 +339,23 @@ class TGATLinkBaseline(nn.Module, SharedLinkProtocol):
                 sources = stream.sources[rows]
                 destinations = stream.destinations[rows]
                 times = stream.timestamps[rows]
-                sampled = torch.randint(
-                    negative_pool.numel(),
-                    destinations.shape,
-                    generator=negative_rng,
-                    device=random_device,
-                ).to(negative_pool.device)
-                negatives = negative_pool[sampled]
+                if table_sources is None:
+                    negative_sources = sources
+                    sampled = torch.randint(
+                        negative_pool.numel(),
+                        destinations.shape,
+                        generator=negative_rng,
+                        device=random_device,
+                    ).to(negative_pool.device)
+                    negatives = negative_pool[sampled]
+                else:
+                    negative_sources = table_sources[rows]
+                    negatives = table_destinations[rows]
                 positive_logits = self._score_pairs(
                     sources, destinations, times, self._full_index, neighbor_rng
                 )
                 negative_logits = self._score_pairs(
-                    sources, negatives, times, self._full_index, neighbor_rng
+                    negative_sources, negatives, times, self._full_index, neighbor_rng
                 )
                 positive_scores = torch.sigmoid(positive_logits)
                 negative_scores = torch.sigmoid(negative_logits)

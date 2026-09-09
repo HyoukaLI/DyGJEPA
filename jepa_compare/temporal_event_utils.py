@@ -13,6 +13,7 @@ from .link_prediction import (
     link_prediction_metrics,
     sample_link_queries,
 )
+from .negative_edges import NegativeEdgeTable
 
 
 @dataclass(frozen=True)
@@ -334,6 +335,10 @@ class SharedLinkProtocol:
     negative_destination_candidates: Tensor | None
     allow_negative_collisions: bool
     eval_positive_batch_size: int | None
+    # DyGLib historical/inductive evaluation negatives.  The comparison driver
+    # attaches the table right before the final validation/test evaluation;
+    # while it is None every evaluator samples DyGLib random negatives.
+    negative_edge_table: NegativeEdgeTable | None = None
 
     def sample_queries(self, window: Sequence[Snapshot], seed: int) -> LinkQueries:
         return sample_link_queries(
@@ -347,6 +352,7 @@ class SharedLinkProtocol:
             bipartite_source_count=self.num_users,
             negative_destination_candidates=self.negative_destination_candidates,
             allow_negative_collisions=self.allow_negative_collisions,
+            negative_edges=self.negative_edge_table,
         )
 
     def metrics(
