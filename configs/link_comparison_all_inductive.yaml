@@ -1,0 +1,35 @@
+# Inductive negative sampling (Poursafaei et al., NeurIPS 2022) for the link
+# comparison, run separately from the random- and historical-negative runs.
+#
+# This file is an overlay: every dataset entry, model setting and optimizer
+# recipe is inherited from link_comparison_all.yaml, so tuning done there is
+# picked up here automatically.  Only the evaluation negatives and the result
+# location change.  Launch with
+#
+#   bash scripts/run_link_datasets_inductive.sh [datasets...]
+#   sbatch run_link_datasets_inductive.sbatch
+#
+# Protocol, as in DyGLib evaluate_link_prediction.py --negative_sample_strategy
+# inductive (the "ind" columns of DyGFormer / DyG-Mamba style tables): models
+# are trained and their checkpoints selected with random negatives exactly as
+# in the base run; the final validation/test pass of the selected checkpoint
+# then scores one shared pre-sampled inductive negative per event -- an edge
+# that first appeared during the evaluation period (after the last training
+# timestamp for validation, after the last validation timestamp for test),
+# was observed before the 200-event batch and is absent from it, both
+# endpoints replaced; random (source, destination) pairs fill a short pool.
+# Validation seed 0, test seed 2.  EdgeBank keeps edgebank.memory_mode from
+# the base config.
+base_config: link_comparison_all.yaml
+
+link:
+  negative_strategy: inductive
+
+# Separate result tree; the driver additionally suffixes every file with
+# _inductive, e.g. results/inductive/link_comparison_canparl_inductive.json
+# and results/inductive/link_comparison_all_inductive.json.
+output_dir: results/inductive
+summary_output_path: results/inductive/link_comparison_all.json
+
+wandb:
+  tags: [inductive]

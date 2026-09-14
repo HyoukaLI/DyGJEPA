@@ -421,6 +421,11 @@ link:
   #                validation/test pass scores one shared pre-sampled table
   #                (validation seed 0, test seed 2).  Results are written to
   #                *_historical.json so random results are never overwritten.
+  #   inductive  - same mechanics, but the pool only holds edges first seen
+  #                during the evaluation period (after the last training
+  #                timestamp for validation, after the last validation
+  #                timestamp for test), i.e. DyGLib's inductive_sample.
+  #                Results go to *_inductive.json.
   negative_strategy: random
 
 # Shared evaluation/checkpoint cadence only. Optimizer settings are intentionally

@@ -117,6 +117,28 @@ modes are not reproduced. Setting `link.negative_strategy: historical`
 directly in any config has the same effect and suffixes its result files with
 `_historical`.
 
+### Inductive negative sampling (separate run)
+
+DyGLib's inductive negatives (`--negative_sample_strategy inductive`, the
+"ind" columns of DyGFormer / DyG-Mamba style tables) are a third separate run:
+
+```bash
+bash scripts/run_link_datasets_inductive.sh              # all datasets
+bash scripts/run_link_datasets_inductive.sh canparl uci  # a subset
+sbatch run_link_datasets_inductive.sbatch                # cluster; DATASET_NAMES/MODELS/SEEDS/EPOCHS as usual
+```
+
+`configs/link_comparison_all_inductive.yaml` overlays the random config like
+the historical one. The mechanics are the historical protocol with a smaller
+pool: a negative must be an edge that first appeared during the evaluation
+period itself -- after the last training timestamp for validation, after the
+last validation timestamp for test (DyGLib's `observed_edges` boundary) -- was
+observed before the 200-event batch and is absent from it. Short pools are
+again filled with random pairs, so early evaluation batches are close to the
+random protocol and later ones increasingly test whether a model picks up the
+recurrence of edges it never saw in training. Results go to
+`results/inductive/*_inductive.json`.
+
 Each model is reinitialized independently for every seed. To override the seed list:
 
 ```bash

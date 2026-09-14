@@ -537,3 +537,69 @@ def test_historical_overlay_config_inherits_the_random_run() -> None:
     # Result files never collide with the random run's.
     random_expanded = dict(_dataset_configs(load_config(base_path)))
     assert random_expanded["canparl"]["output_path"] == "results/link_comparison_canparl.json"
+
+
+def test_inductive_table_flows_through_queries_and_evaluators() -> None:
+    windows, num_users, num_nodes = event_windows(bipartite=False, events=12)
+    split = make_split(windows)
+    table = negative_edge_table_from_snapshots(
+        unique_snapshots(windows),
+        {
+            "validation": unique_snapshots(split.validation, targets_only=True),
+            "test": unique_snapshots(split.test, targets_only=True),
+        },
+        {"validation": 0, "test": 2},
+        strategy="inductive",
+        batch_size=4,
+        bipartite_source_count=num_users,
+    )
+    assert table is not None and table.strategy == "inductive"
+    snapshots = unique_snapshots(windows)
+    first_test = split.test[0][-1].time
+    observed_before_test = {
+        (int(u), int(v))
+        for snapshot in snapshots
+        if snapshot.time < first_test
+        for u, v in snapshot.query_edge_index.t().tolist()
+    }
+    assert table.summary["test"]["last_observed_time"] == float(
+        max(float(s.query_timestamps.max()) for s in snapshots if s.time < first_test)
+    )
+    expected = table.for_snapshots([w[-1].time for w in split.test])
+    for edge, is_pool in zip(
+        zip(expected.sources.tolist(), expected.destinations.tolist()),
+        expected.from_pool.tolist(),
+    ):
+        if is_pool:
+            assert edge not in observed_before_test
+
+    window = split.test[0]
+    queries = sample_link_queries(
+        window[-1], window[-2], seed=5, **query_kwargs(windows, num_users, table)
+    )
+    entry = table.for_snapshot(window[-1].time)
+    negatives = queries.pairs[queries.labels == 0]
+    negative_groups = queries.group_ids[queries.labels == 0]
+    for row, group in zip(negatives.tolist(), negative_groups.tolist()):
+        assert row == [int(entry.sources[group]), int(entry.destinations[group])]
+
+    model = tcl_model(windows, num_users, num_nodes)
+    model.negative_edge_table = table
+    metrics = model.evaluate_protocol(split.test, [*split.train, *split.validation], query_seed=2)
+    assert metrics["examples"] == 2.0 * len(expected)
+
+
+def test_inductive_overlay_config_inherits_the_random_run() -> None:
+    base = load_config(Path("configs/link_comparison_all.yaml"))
+    config = load_config(Path("configs/link_comparison_all_inductive.yaml"))
+    assert _negative_strategy(config) == "inductive"
+    assert config["datasets"] == base["datasets"]
+    for section in ("rcps_jepa", "rcps_training", "dygformer", "edgebank", "training"):
+        assert config[section] == base[section]
+    assert config["output_dir"] == "results/inductive"
+    expanded = dict(_dataset_configs(config))
+    assert expanded["canparl"]["output_path"] == (
+        "results/inductive/link_comparison_canparl_inductive.json"
+    )
+    historical = dict(_dataset_configs(load_config(Path("configs/link_comparison_all_historical.yaml"))))
+    assert historical["canparl"]["output_path"] != expanded["canparl"]["output_path"]

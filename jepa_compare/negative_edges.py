@@ -3,19 +3,25 @@
 Poursafaei et al. (NeurIPS 2022) evaluate dynamic link prediction against
 negatives that are harder than uniformly corrupted destinations.  DyGLib's
 ``NegativeEdgeSampler`` implements them; this module mirrors its
-``historical`` strategy so every method in the comparison scores the same
-negatives.  It is deliberately NumPy-only so the sampling core can be checked
-without a PyTorch installation.
+``historical`` and ``inductive`` strategies so every method in the comparison
+scores the same negatives.  It is deliberately NumPy-only so the sampling core
+can be checked without a PyTorch installation.
 
-Protocol (DyGLib ``utils/utils.py`` at commit 3aacc36, ``historical_sample``):
+Protocol (DyGLib ``utils/utils.py`` at commit 3aacc36, ``historical_sample`` /
+``inductive_sample``):
 
 * the sampler is built on the complete event stream (train + validation +
   test) and seeded once per split: 0 for validation, 2 for test, with
   ``reset_random_state()`` before each evaluation pass;
 * an evaluation batch consists of ``batch_size`` (200) consecutive positive
   events; ``t_start``/``t_end`` are the timestamps of its first/last event;
-* the candidate pool is ``{edges with t <= t_start} - {edges with
+* the historical pool is ``{edges with t <= t_start} - {edges with
   t_start <= t <= t_end}`` (both endpoints fixed, ordered pairs);
+* the inductive pool additionally removes ``observed_edges = {edges with
+  t <= last_observed_time}``, where ``last_observed_time`` is the last training
+  timestamp for the validation sampler and the last validation timestamp for
+  the test sampler (DyGLib ``evaluate_link_prediction.py``): only edges first
+  seen during the evaluation period itself remain;
 * ``size`` distinct edges are drawn uniformly from the pool.  When the pool is
   smaller than ``size`` every pool edge is used and the remainder is filled
   with uniformly random ``(unique source, unique destination)`` pairs that do
@@ -37,19 +43,15 @@ from typing import Mapping, Sequence
 import numpy as np
 
 
-NEGATIVE_STRATEGIES = ("random", "historical")
+NEGATIVE_STRATEGIES = ("random", "historical", "inductive")
+TABLE_STRATEGIES = ("historical", "inductive")
 
 
 def normalize_negative_strategy(value: object) -> str:
-    """Validate ``link.negative_strategy``; ``inductive`` is not implemented yet."""
+    """Validate ``link.negative_strategy`` (random, historical or inductive)."""
     strategy = str(value).lower()
     if strategy in NEGATIVE_STRATEGIES:
         return strategy
-    if strategy == "inductive":
-        raise NotImplementedError(
-            "link.negative_strategy 'inductive' is not implemented yet; "
-            "use 'random' or 'historical'"
-        )
     raise ValueError(
         f"unknown link.negative_strategy {value!r}; expected one of "
         f"{list(NEGATIVE_STRATEGIES)}"
@@ -72,7 +74,7 @@ def _as_float64(values: object, name: str) -> np.ndarray:
     return array
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, eq=False)
 class SnapshotNegativeEdges:
     """Negatives for one evaluation snapshot, aligned with its events.
 
@@ -154,13 +156,18 @@ def concatenate_negative_edges(
     )
 
 
-class HistoricalNegativeEdgeSampler:
-    """DyGLib ``NegativeEdgeSampler(negative_sample_strategy="historical")``.
+class DyGLibNegativeEdgeSampler:
+    """DyGLib ``NegativeEdgeSampler`` for the ``historical``/``inductive`` strategies.
 
     ``sources``/``destinations``/``timestamps`` describe the complete event
     stream in chronological order.  DyGLib's evaluation loop calls ``sample``
     with non-decreasing batch start times, so the history set is maintained
     incrementally; an earlier start time (a new evaluation pass) rebuilds it.
+
+    For ``inductive`` the pool excludes every edge observed up to
+    ``last_observed_time``.  Because the history is kept in first-seen order,
+    those observed edges are exactly its first ``_observed_count`` entries, so
+    the inductive pool is the tail of the history minus the batch edges.
     """
 
     def __init__(
@@ -169,7 +176,14 @@ class HistoricalNegativeEdgeSampler:
         destinations: np.ndarray,
         timestamps: np.ndarray,
         seed: int,
+        *,
+        strategy: str = "historical",
+        last_observed_time: float | None = None,
     ) -> None:
+        strategy = normalize_negative_strategy(strategy)
+        if strategy not in TABLE_STRATEGIES:
+            raise ValueError("the sampler implements the historical/inductive strategies")
+        self.strategy = strategy
         self.sources = _as_int64(sources, "sources")
         self.destinations = _as_int64(destinations, "destinations")
         self.timestamps = _as_float64(timestamps, "timestamps")
@@ -192,6 +206,18 @@ class HistoricalNegativeEdgeSampler:
         self._history_edges: list[tuple[int, int]] = []
         self._history_index: dict[tuple[int, int], int] = {}
         self._history_cursor = 0
+        # Inductive: number of distinct edges whose first occurrence has
+        # timestamp <= last_observed_time (DyGLib ``observed_edges``).
+        self.last_observed_time = None
+        self._observed_count = 0
+        if strategy == "inductive":
+            if last_observed_time is None:
+                raise ValueError("the inductive strategy needs last_observed_time")
+            self.last_observed_time = float(last_observed_time)
+            stop = int(np.searchsorted(self.timestamps, self.last_observed_time, side="right"))
+            self._observed_count = len(
+                set(zip(self.sources[:stop].tolist(), self.destinations[:stop].tolist()))
+            )
 
     def reset_random_state(self) -> None:
         """Mirror DyGLib: evaluation passes restart the seeded generator."""
@@ -222,24 +248,36 @@ class HistoricalNegativeEdgeSampler:
                 self._history_edges.append(edge)
         self._history_cursor = stop
 
-    def historical_pool(
+    def _pool_start(self) -> int:
+        """First history index eligible for the pool (observed edges excluded)."""
+        return self._observed_count if self.strategy == "inductive" else 0
+
+    def candidate_pool(
         self, batch_start_time: float, batch_end_time: float
     ) -> set[tuple[int, int]]:
         """Candidate pool of one batch (exposed for protocol checks)."""
         self._advance_history(batch_start_time)
         current = self._edges_between(batch_start_time, batch_end_time)
-        return {edge for edge in self._history_edges if edge not in current}
+        return {
+            edge
+            for edge in self._history_edges[self._pool_start() :]
+            if edge not in current
+        }
+
+    # Backwards-compatible name from the historical-only version.
+    historical_pool = candidate_pool
 
     def _choose_from_history(
         self, size: int, excluded: set[tuple[int, int]]
     ) -> list[tuple[int, int]]:
-        """Uniform draw of ``size`` distinct history edges outside ``excluded``."""
+        """Uniform draw of ``size`` distinct pool edges outside ``excluded``."""
+        start = self._pool_start()
         total = len(self._history_edges)
         chosen: list[tuple[int, int]] = []
         taken: set[int] = set()
         while len(chosen) < size:
             draws = self.random_state.randint(
-                0, total, size=2 * (size - len(chosen)) + 8
+                start, total, size=2 * (size - len(chosen)) + 8
             )
             for index in draws.tolist():
                 if index in taken:
@@ -320,10 +358,15 @@ class HistoricalNegativeEdgeSampler:
             raise ValueError("batch_end_time precedes batch_start_time")
         self._advance_history(batch_start_time)
         current = self._edges_between(batch_start_time, batch_end_time)
-        overlap = sum(1 for edge in current if edge in self._history_index)
-        pool_size = len(self._history_edges) - overlap
+        start = self._pool_start()
+        overlap = sum(
+            1
+            for edge in current
+            if self._history_index.get(edge, -1) >= start
+        )
+        pool_size = max(0, len(self._history_edges) - start) - overlap
         if size > pool_size:
-            pool = [edge for edge in self._history_edges if edge not in current]
+            pool = [edge for edge in self._history_edges[start:] if edge not in current]
             fill = self.random_fill(size - pool_size, batch_sources, batch_destinations)
             edges = fill + pool
             from_pool = np.concatenate(
@@ -339,8 +382,11 @@ class HistoricalNegativeEdgeSampler:
         return sources, destinations, from_pool
 
 
+HistoricalNegativeEdgeSampler = DyGLibNegativeEdgeSampler
+
+
 def sample_stream_negatives(
-    sampler: HistoricalNegativeEdgeSampler,
+    sampler: DyGLibNegativeEdgeSampler,
     sources: np.ndarray,
     destinations: np.ndarray,
     timestamps: np.ndarray,
@@ -382,7 +428,7 @@ def sample_stream_negatives(
     return negative_sources, negative_destinations, from_pool
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, eq=False)
 class NegativeEdgeTable:
     """Per-snapshot evaluation negatives shared by every compared method.
 
@@ -434,9 +480,15 @@ def build_negative_edge_table(
     concatenated in time order to form DyGLib's ``full_data``.
     ``evaluation_targets`` maps a split name to the times of its target
     snapshots (in order) and ``seeds`` gives that split's sampler seed.
+
+    For ``inductive`` each split's ``last_observed_time`` is the latest
+    timestamp of any snapshot before that split's first target snapshot, i.e.
+    the end of the training period for validation and the end of the
+    validation period for test, matching ``train_data.node_interact_times[-1]``
+    and ``val_data.node_interact_times[-1]`` in DyGLib's evaluation script.
     """
     strategy = normalize_negative_strategy(strategy)
-    if strategy == "random":
+    if strategy not in TABLE_STRATEGIES:
         raise ValueError("the random strategy does not use a negative edge table")
     if batch_size < 1:
         raise ValueError("batch_size must be positive")
@@ -485,8 +537,26 @@ def build_negative_edge_table(
         split_sources = np.concatenate([per_snapshot[t][0] for t in target_times])
         split_destinations = np.concatenate([per_snapshot[t][1] for t in target_times])
         split_timestamps = np.concatenate([per_snapshot[t][2] for t in target_times])
-        sampler = HistoricalNegativeEdgeSampler(
-            full_sources, full_destinations, full_timestamps, seed=int(seeds[split_name])
+        last_observed_time = None
+        if strategy == "inductive":
+            earlier = [
+                per_snapshot[time][2]
+                for time in times
+                if time < target_times[0] and per_snapshot[time][2].size
+            ]
+            if not earlier:
+                raise ValueError(
+                    f"{split_name} has no observed history before snapshot "
+                    f"{target_times[0]}; inductive negatives need one"
+                )
+            last_observed_time = float(max(array[-1] for array in earlier))
+        sampler = DyGLibNegativeEdgeSampler(
+            full_sources,
+            full_destinations,
+            full_timestamps,
+            seed=int(seeds[split_name]),
+            strategy=strategy,
+            last_observed_time=last_observed_time,
         )
         negative_sources, negative_destinations, from_pool = sample_stream_negatives(
             sampler, split_sources, split_destinations, split_timestamps, batch_size
@@ -512,4 +582,7 @@ def build_negative_edge_table(
                 len(set(zip(negative_sources.tolist(), negative_destinations.tolist())))
             ),
         }
+        if last_observed_time is not None:
+            summary[split_name]["last_observed_time"] = last_observed_time
+            summary[split_name]["observed_edges"] = float(sampler._observed_count)
     return NegativeEdgeTable(strategy=strategy, entries=entries, summary=summary)
