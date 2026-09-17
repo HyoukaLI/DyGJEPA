@@ -6,7 +6,14 @@ __pycache__/
 *.egg-info/
 checkpoints/
 runs/
-data/raw/
+# Raw node-classification inputs live on the GitHub release
+# (scripts/download_node_data.sh); only the small Tmall raw files are
+# versioned here, the edge list gzip-compressed to stay under 100 MB.
+data/raw/*
+!data/raw/tmall/
+data/raw/tmall/*
+!data/raw/tmall/tmall.txt.gz
+!data/raw/tmall/node2label.txt
 data/processed/tmall.npz
 data/processed/patent.npz
 data/processed/dblp.npz

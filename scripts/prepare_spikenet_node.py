@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import ast
 from collections import defaultdict
+import gzip
 from pathlib import Path
 
 import numpy as np
@@ -31,12 +32,23 @@ def _encode_labels(values: list[str]) -> np.ndarray:
     return np.asarray([classes[value] for value in values], dtype=np.int64)
 
 
+def _open_text(path: Path):
+    """Open ``path`` or its gzip twin ``<path>.gz`` (the Tmall edge list is
+    shipped in the repository as tmall.txt.gz to stay under GitHub's limit)."""
+    if path.exists():
+        return path.open()
+    compressed = path.with_name(path.name + ".gz")
+    if compressed.exists():
+        return gzip.open(compressed, "rt")
+    raise FileNotFoundError(f"{path} (or {compressed.name}) not found")
+
+
 def _read_tmall(
     edge_path: Path, label_path: Path
 ) -> tuple[list[np.ndarray], list[str], int, np.ndarray, np.ndarray]:
     grouped: dict[str, list[tuple[int, int]]] = defaultdict(list)
     max_node = -1
-    with edge_path.open() as handle:
+    with _open_text(edge_path) as handle:
         for line_no, line in enumerate(handle, 1):
             fields = line.split()
             if len(fields) != 3:
@@ -51,7 +63,7 @@ def _read_tmall(
 
     labeled_nodes: list[int] = []
     raw_labels: list[str] = []
-    with label_path.open() as handle:
+    with _open_text(label_path) as handle:
         for line_no, line in enumerate(handle, 1):
             fields = line.split()
             if len(fields) != 2:
@@ -103,7 +115,7 @@ def _read_patent(
 ) -> tuple[list[np.ndarray], list[int], int, np.ndarray, np.ndarray]:
     grouped: dict[int, list[tuple[int, int]]] = defaultdict(list)
     max_edge_node = -1
-    with edge_path.open() as handle:
+    with _open_text(edge_path) as handle:
         for line_no, line in enumerate(handle, 1):
             src, dst, date, _, _ = _literal_tuple(edge_path, line_no, line, 5)
             src, dst, year = int(src), int(dst), int(date) // 10_000
@@ -116,7 +128,7 @@ def _read_patent(
 
     labels_by_node: dict[int, int] = {}
     max_label_node = -1
-    with node_path.open() as handle:
+    with _open_text(node_path) as handle:
         for line_no, line in enumerate(handle, 1):
             node, _, _, label = _literal_tuple(node_path, line_no, line, 4)
             node, label = int(node), int(label) - 1
