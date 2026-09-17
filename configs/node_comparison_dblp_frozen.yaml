@@ -218,12 +218,14 @@ training:
   selection_probe_epochs: 100
   probe_epochs: 500
   probe_hidden_dim: 512
-  # Trained views only: the frozen hop2/hop8 ensemble is a training-independent
-  # control and lives in node_comparison_dblp_frozen.yaml.
-  rcps_multiscale_views: [prediction, encoder]
-  # Matches the baseline default ("encoder", "prediction"); fused carries no
-  # gradient from node_loss_windows and must not drive checkpoint selection.
-  rcps_checkpoint_views: [prediction, encoder]
+  # Fixed before test evaluation: local relation context + long-range diffusion.
+  rcps_multiscale_views: [hop2, hop8]
+  # Checkpoint selection uses the validation logit ensemble over exactly these
+  # views, which is also what is reported at test time; the driver refuses to
+  # run if this list differs from rcps_multiscale_views.
+  # Both views here are deterministic functions of the frozen maps, so
+  # selection is a no-op for this control row -- it must still agree.
+  rcps_checkpoint_views: [hop2, hop8]
   min_checkpoint_epoch: 25
 
 # Weights & Biases (off by default).  Enable with --wandb on the command line

@@ -132,7 +132,10 @@ class DyGLibLinkBaseline(nn.Module, SharedLinkProtocol):
     padded event representation and supplies the common split/query/metrics.
     """
 
-    SUPPORTED = {"dyrep", "tgn", "cawn", "tcl", "graphmixer", "dygformer"}
+    SUPPORTED = {"jodie", "dyrep", "tgn", "cawn", "tcl", "graphmixer", "dygformer"}
+    # DyGLib implements JODIE, DyRep and TGN as one memory model; JODIE uses a
+    # shared node memory, an RNN updater and the time-projection embedding.
+    MEMORY_MODEL_NAMES = {"jodie": "JODIE", "dyrep": "DyRep", "tgn": "TGN"}
 
     def __init__(
         self,
@@ -216,7 +219,7 @@ class DyGLibLinkBaseline(nn.Module, SharedLinkProtocol):
 
     @property
     def is_memory_model(self) -> bool:
-        return self.model_name in {"dyrep", "tgn"}
+        return self.model_name in self.MEMORY_MODEL_NAMES
 
     def prepare_streams(
         self,
@@ -277,7 +280,7 @@ class DyGLibLinkBaseline(nn.Module, SharedLinkProtocol):
             dropout=self.dropout,
             device=device,
         )
-        if self.model_name in {"dyrep", "tgn"}:
+        if self.is_memory_model:
             shifts = compute_src_dst_node_time_shifts(
                 self._train_stream.sources,
                 self._train_stream.destinations,
@@ -285,7 +288,7 @@ class DyGLibLinkBaseline(nn.Module, SharedLinkProtocol):
             )
             self.backbone = MemoryModel(
                 **common,
-                model_name="DyRep" if self.model_name == "dyrep" else "TGN",
+                model_name=self.MEMORY_MODEL_NAMES[self.model_name],
                 num_layers=self.num_layers,
                 num_heads=self.num_heads,
                 src_node_mean_time_shift=shifts[0],
@@ -342,6 +345,10 @@ class DyGLibLinkBaseline(nn.Module, SharedLinkProtocol):
 
     def _set_sampler(self, sampler: NeighborSampler) -> None:
         backbone, _ = self._require_prepared()
+        if self.model_name == "jodie":
+            # DyGLib's JODIE embeds nodes by time projection of their memory and
+            # owns no neighbor sampler; DyGLib's loops skip it here as well.
+            return
         backbone.set_neighbor_sampler(sampler)  # type: ignore[attr-defined]
 
     def _embeddings(

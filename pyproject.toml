@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "sg-rcps-jepa-comparison"
 version = "0.1.0"
-description = "Matched dynamic-graph comparison of RCPS-JEPA and temporal link-prediction baselines"
+description = "Matched dynamic-graph comparison of DyGJEPA and temporal link-prediction baselines"
 requires-python = ">=3.10"
 dependencies = [
   "numpy>=1.24",

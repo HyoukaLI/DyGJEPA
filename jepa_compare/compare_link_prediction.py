@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import nullcontext
 from copy import deepcopy
 import json
 import random
@@ -13,6 +14,7 @@ import yaml
 
 from .data import load_npz, make_synthetic
 from .dyglib_baselines import DyGLibLinkBaseline, EdgeBankLinkBaseline
+from .efficiency import EfficiencyMeter
 from .jodie_baseline import JODIELinkBaseline
 from .link_prediction import (
     TemporalWindowSplit,
@@ -71,6 +73,33 @@ def _negative_strategy(config: dict) -> str:
     return normalize_negative_strategy(
         dict(config.get("link", {})).get("negative_strategy", "random")
     )
+
+
+_ABLATION_KEYS = ("name", "rcps_jepa", "rcps_training")
+
+
+def _rcps_ablation(config: dict) -> dict:
+    """Validate the optional ``ablation`` section of an DyGJEPA ablation overlay.
+
+    ``ablation.rcps_jepa`` / ``ablation.rcps_training`` are applied after the
+    dataset-specific ``overrides`` so one overlay removes the same module on
+    every dataset, whatever the per-dataset DyGJEPA recipe says (a plain
+    top-level ``rcps_jepa`` key would lose to those overrides).
+    """
+    ablation = config.get("ablation")
+    if ablation is None:
+        return {}
+    if not isinstance(ablation, dict):
+        raise ValueError("ablation must be a mapping")
+    unknown = sorted(set(ablation) - set(_ABLATION_KEYS))
+    if unknown:
+        raise ValueError(
+            f"unknown ablation fields {unknown}; expected {list(_ABLATION_KEYS)}"
+        )
+    for key in ("rcps_jepa", "rcps_training"):
+        if key in ablation and not isinstance(ablation[key], dict):
+            raise ValueError(f"ablation.{key} must be a mapping")
+    return dict(ablation)
 
 
 def _with_strategy_suffix(path: str | Path, strategy: str) -> str:
@@ -173,6 +202,26 @@ def _assert_full_event_coverage(
                 )
 
 
+def _phase(meter: EfficiencyMeter | None, phase: str, epoch: int | None = None):
+    """Time one training/evaluation phase when an efficiency meter is attached."""
+    if meter is None:
+        return nullcontext()
+    return meter.measure(phase, epoch=epoch)
+
+
+def _efficiency_record(
+    meter: EfficiencyMeter | None, model: nn.Module | None, test: dict
+) -> dict[str, float] | None:
+    """Per-model efficiency record stored next to validation/test metrics."""
+    if meter is None:
+        return None
+    return meter.summary(
+        model,
+        int(float(test.get("best_epoch", 0.0))),
+        test_examples=test.get("examples"),
+    )
+
+
 def _train_one(
     name: str,
     model: nn.Module,
@@ -180,6 +229,7 @@ def _train_one(
     training: dict,
     seed: int,
     negative_edge_table: NegativeEdgeTable | None = None,
+    meter: EfficiencyMeter | None = None,
 ) -> tuple[dict[str, float], dict[str, float]]:
     """Train one model, mirroring its epochs into a wandb run when enabled.
 
@@ -187,11 +237,12 @@ def _train_one(
     only for the final validation/test pass of the selected checkpoint; the
     per-epoch validation that picks the checkpoint keeps random negatives,
     exactly as DyGLib trains with ``train_link_prediction.py`` and then
-    re-evaluates with ``evaluate_link_prediction.py``.
+    re-evaluates with ``evaluate_link_prediction.py``.  ``meter`` records the
+    wall-clock of every phase for the efficiency comparison.
     """
     with wandb_logging.run_for_model(name, seed, {"training": training}) as wb_run:
         return _train_one_inner(
-            name, model, split, training, seed, wb_run, negative_edge_table
+            name, model, split, training, seed, wb_run, negative_edge_table, meter
         )
 
 
@@ -203,6 +254,7 @@ def _train_one_inner(
     seed: int,
     wb_run,
     negative_edge_table: NegativeEdgeTable | None = None,
+    meter: EfficiencyMeter | None = None,
 ) -> tuple[dict[str, float], dict[str, float]]:
     native_jodie = isinstance(model, JODIELinkBaseline)
     native_event_model = isinstance(
@@ -264,14 +316,15 @@ def _train_one_inner(
 
     if bool(training.get("evaluate_before_training", False)):
         model.eval()
-        validation = evaluate(split.validation, split.train, validation_query_seed)
+        with _phase(meter, "validation", 0):
+            validation = evaluate(split.validation, split.train, validation_query_seed)
         print(json.dumps({"model": name, "epoch": 0, "validation": validation}))
         wb_run.log(_flat("val", validation), step=0)
         best_metrics = {metric: validation[metric] for metric in checkpoint_metrics}
         best_epoch = 0
         best_state = cpu_state_dict(model)
 
-    for epoch in range(1, epochs + 1):
+    def train_step(epoch: int) -> tuple[dict, float]:
         model.train()
         if native_event_model:
             if native_jodie:
@@ -319,9 +372,6 @@ def _train_one_inner(
                 model.parameters(), float(training["grad_clip"])
             )
             optimizer.step()
-        if not np.isfinite(loss_value):
-            raise RuntimeError(f"{name} produced a non-finite loss at epoch {epoch}")
-        wb_run.log(_flat("train", metrics), step=epoch)
         if hasattr(model, "update_target_encoder") and not (
             isinstance(model, RCPSJEPA)
             and (
@@ -330,12 +380,21 @@ def _train_one_inner(
             )
         ):
             model.update_target_encoder()
+        return metrics, loss_value
+
+    for epoch in range(1, epochs + 1):
+        with _phase(meter, "train_epoch"):
+            metrics, loss_value = train_step(epoch)
+        if not np.isfinite(loss_value):
+            raise RuntimeError(f"{name} produced a non-finite loss at epoch {epoch}")
+        wb_run.log(_flat("train", metrics), step=epoch)
 
         if epoch == 1 or epoch % eval_every == 0 or epoch == epochs:
             model.eval()
-            validation = evaluate(
-                split.validation, split.train, validation_query_seed
-            )
+            with _phase(meter, "validation", epoch):
+                validation = evaluate(
+                    split.validation, split.train, validation_query_seed
+                )
             if scheduler is not None:
                 scheduler.step(validation["ap"])
             print(json.dumps({"model": name, "epoch": epoch, "train": metrics, "validation": validation}))
@@ -361,14 +420,16 @@ def _train_one_inner(
     model.eval()
     if negative_edge_table is not None:
         model.negative_edge_table = negative_edge_table
-    validation = evaluate(
-        split.validation, split.train, validation_query_seed
-    )
-    test = evaluate(
-        split.test,
-        [*split.train, *split.validation],
-        test_query_seed,
-    )
+    with _phase(meter, "final_validation"):
+        validation = evaluate(
+            split.validation, split.train, validation_query_seed
+        )
+    with _phase(meter, "test"):
+        test = evaluate(
+            split.test,
+            [*split.train, *split.validation],
+            test_query_seed,
+        )
     test["best_epoch"] = float(best_epoch)
     wb_run.summary(
         {
@@ -387,11 +448,12 @@ def _train_snapshot_ssl_one(
     training: dict,
     seed: int,
     negative_edge_table: NegativeEdgeTable | None = None,
+    meter: EfficiencyMeter | None = None,
 ) -> tuple[dict[str, float], dict[str, float | str]]:
     """Run native SSL pretraining followed by a shared frozen link probe."""
     with wandb_logging.run_for_model(name, seed, {"training": training}) as wb_run:
         return _train_snapshot_ssl_one_inner(
-            name, model, split, training, seed, wb_run, negative_edge_table
+            name, model, split, training, seed, wb_run, negative_edge_table, meter
         )
 
 
@@ -403,6 +465,7 @@ def _train_snapshot_ssl_one_inner(
     seed: int,
     wb_run,
     negative_edge_table: NegativeEdgeTable | None = None,
+    meter: EfficiencyMeter | None = None,
 ) -> tuple[dict[str, float], dict[str, float | str]]:
     """Pretrain, then fit the frozen probe, logging both stages separately."""
     pretrain_optimizer = torch.optim.Adam(
@@ -414,12 +477,13 @@ def _train_snapshot_ssl_one_inner(
     pretrain_epochs = int(training["pretrain_epochs"])
     grad_clip = float(training.get("grad_clip", 1.0))
     for epoch in range(1, pretrain_epochs + 1):
-        metrics = model.pretrain_epoch(
-            train_snapshots,
-            pretrain_optimizer,
-            grad_clip,
-            seed + epoch * 10_000,
-        )
+        with _phase(meter, "pretrain_epoch"):
+            metrics = model.pretrain_epoch(
+                train_snapshots,
+                pretrain_optimizer,
+                grad_clip,
+                seed + epoch * 10_000,
+            )
         if not np.isfinite(float(metrics["loss"])):
             raise RuntimeError(f"{name} produced a non-finite SSL loss at epoch {epoch}")
         if epoch == 1 or epoch % int(training.get("pretrain_log_every", 10)) == 0 or epoch == pretrain_epochs:
@@ -448,19 +512,21 @@ def _train_snapshot_ssl_one_inner(
     best_epoch = 0
     best_probe_state: dict[str, torch.Tensor] | None = None
     for epoch in range(1, probe_epochs + 1):
-        metrics = model.train_probe_epoch(
-            split.train,
-            probe_optimizer,
-            grad_clip,
-            pair_batch_size,
-            seed + epoch * 10_000,
-        )
-        if epoch == 1 or epoch % eval_every == 0 or epoch == probe_epochs:
-            validation = model.evaluate_windows(
-                split.validation,
-                pair_batch_size=pair_batch_size,
-                query_seed=validation_query_seed,
+        with _phase(meter, "train_epoch"):
+            metrics = model.train_probe_epoch(
+                split.train,
+                probe_optimizer,
+                grad_clip,
+                pair_batch_size,
+                seed + epoch * 10_000,
             )
+        if epoch == 1 or epoch % eval_every == 0 or epoch == probe_epochs:
+            with _phase(meter, "validation", epoch):
+                validation = model.evaluate_windows(
+                    split.validation,
+                    pair_batch_size=pair_batch_size,
+                    query_seed=validation_query_seed,
+                )
             print(json.dumps({"model": name, "stage": "frozen_link_probe", "epoch": epoch, "train": metrics, "validation": validation}))
             wb_run.log(
                 {
@@ -490,16 +556,18 @@ def _train_snapshot_ssl_one_inner(
     model.eval()
     if negative_edge_table is not None:
         model.negative_edge_table = negative_edge_table
-    validation = model.evaluate_windows(
-        split.validation,
-        pair_batch_size=pair_batch_size,
-        query_seed=validation_query_seed,
-    )
-    test: dict[str, float | str] = model.evaluate_windows(
-        split.test,
-        pair_batch_size=pair_batch_size,
-        query_seed=test_query_seed,
-    )
+    with _phase(meter, "final_validation"):
+        validation = model.evaluate_windows(
+            split.validation,
+            pair_batch_size=pair_batch_size,
+            query_seed=validation_query_seed,
+        )
+    with _phase(meter, "test"):
+        test: dict[str, float | str] = model.evaluate_windows(
+            split.test,
+            pair_batch_size=pair_batch_size,
+            query_seed=test_query_seed,
+        )
     test.update(
         {
             "best_epoch": float(best_epoch),
@@ -519,8 +587,12 @@ def _train_snapshot_ssl_one_inner(
     return validation, test
 
 
+# Models that only run when named explicitly with --models / models:.
+_OPT_IN_MODELS = frozenset({"jodie_author"})
+
 _ALL_COMPARISON_MODELS = (
     "jodie",
+    "jodie_author",
     "dyrep",
     "tgat",
     "edgebank",
@@ -561,7 +633,11 @@ def run(config: dict) -> dict[str, dict[str, dict[str, float]]]:
     requested = _requested_models(config)
 
     def should_run(name: str) -> bool:
-        return requested is None or name in requested
+        if requested is None:
+            # jodie_author is the original bipartite JODIE kept for reference;
+            # it only runs when asked for explicitly (--models jodie_author).
+            return name not in _OPT_IN_MODELS
+        return name in requested
 
     common = dict(config["common_model"])
     split_cfg = config.get("split", {})
@@ -602,19 +678,26 @@ def run(config: dict) -> dict[str, dict[str, dict[str, float]]]:
             ),
             flush=True,
         )
+    ablation = _rcps_ablation(config)
     rcps_args = {
         "num_nodes": graph.num_nodes,
         **common,
         **link_cfg,
         **dict(config.get("rcps_jepa", {})),
+        **dict(ablation.get("rcps_jepa", {})),
     }
-    if should_run("jodie") and graph.num_source_nodes is None:
-        raise ValueError("JODIE comparison requires a bipartite user-item graph")
-    jodie_args = {
+    # ``jodie`` is DyGLib's memory-model JODIE (shared node memory, RNN
+    # updater, time-projection embedding, MergeLayer head) and runs on every
+    # dataset like the JODIE column of DyGLib-based papers; it is trained in
+    # the DyGLib backbone loop below.  ``jodie_author`` is the original
+    # bipartite user/item implementation, kept for reference.
+    if should_run("jodie_author") and graph.num_source_nodes is None:
+        raise ValueError("jodie_author requires a bipartite user-item graph")
+    jodie_author_args = {
         "num_nodes": graph.num_nodes,
         "bipartite_source_count": graph.num_source_nodes,
         "hidden_dim": int(common["hidden_dim"]),
-        **dict(config.get("jodie", {})),
+        **dict(config.get("jodie_author", {})),
         **link_cfg,
     }
     tgat_args = {
@@ -624,40 +707,67 @@ def run(config: dict) -> dict[str, dict[str, dict[str, float]]]:
         **link_cfg,
     }
     shared_training = dict(config.get("training", {}))
-    jodie_training = {**shared_training, **dict(config.get("jodie_training", {}))}
+    jodie_author_training = {
+        **shared_training,
+        **dict(config.get("jodie_author_training", {})),
+    }
     tgat_training = {**shared_training, **dict(config.get("tgat_training", {}))}
-    rcps_training = {**shared_training, **dict(config.get("rcps_training", {}))}
+    rcps_training = {
+        **shared_training,
+        **dict(config.get("rcps_training", {})),
+        **dict(ablation.get("rcps_training", {})),
+    }
     result: dict[str, dict[str, dict[str, float]]] = {}
     train_snapshots = unique_snapshots(split.train)
 
-    if should_run("jodie"):
+    def store(name: str, model: nn.Module | None, meter: EfficiencyMeter, validation, test) -> None:
+        # Every model carries its wall-clock / parameter / peak-memory record
+        # next to the metrics (see efficiency.py); the meter was started
+        # before the model was built so setup and peak memory are included.
+        result[name] = {
+            "validation": validation,
+            "test": test,
+            "efficiency": _efficiency_record(meter, model, test),
+        }
+
+    if should_run("jodie_author"):
         torch.manual_seed(seed)
-        jodie_model = JODIELinkBaseline(
-            feature_dim=graph.feature_dim, **jodie_args
-        ).to(device)
-        # The author implementation standardizes event gaps and chooses the
-        # t-batch span from the complete stream.  This is a JODIE preprocessing
-        # detail, not a learned use of validation/test labels.
-        jodie_model.fit_stream_statistics(
-            graph.snapshots, JODIELinkBaseline._unique_snapshots(split.train)
-        )
+        meter = EfficiencyMeter(device)
+        with meter.measure("setup"):
+            jodie_model = JODIELinkBaseline(
+                feature_dim=graph.feature_dim, **jodie_author_args
+            ).to(device)
+            # The author implementation standardizes event gaps and chooses the
+            # t-batch span from the complete stream.  This is a JODIE preprocessing
+            # detail, not a learned use of validation/test labels.
+            jodie_model.fit_stream_statistics(
+                graph.snapshots, JODIELinkBaseline._unique_snapshots(split.train)
+            )
         jodie_validation, jodie_test = _train_one(
-            "jodie", jodie_model, split, jodie_training, seed, negative_edge_table
+            "jodie_author",
+            jodie_model,
+            split,
+            jodie_author_training,
+            seed,
+            negative_edge_table,
+            meter,
         )
-        result["jodie"] = {"validation": jodie_validation, "test": jodie_test}
+        store("jodie_author", jodie_model, meter, jodie_validation, jodie_test)
         del jodie_model
         release_device_memory(device)
 
     if should_run("tgat"):
         torch.manual_seed(seed)
-        tgat_model = TGATLinkBaseline(
-            feature_dim=graph.feature_dim, **tgat_args
-        ).to(device)
-        tgat_model.prepare_streams(graph.snapshots, train_snapshots)
+        meter = EfficiencyMeter(device)
+        with meter.measure("setup"):
+            tgat_model = TGATLinkBaseline(
+                feature_dim=graph.feature_dim, **tgat_args
+            ).to(device)
+            tgat_model.prepare_streams(graph.snapshots, train_snapshots)
         tgat_validation, tgat_test = _train_one(
-            "tgat", tgat_model, split, tgat_training, seed, negative_edge_table
+            "tgat", tgat_model, split, tgat_training, seed, negative_edge_table, meter
         )
-        result["tgat"] = {"validation": tgat_validation, "test": tgat_test}
+        store("tgat", tgat_model, meter, tgat_validation, tgat_test)
         del tgat_model
         release_device_memory(device)
 
@@ -666,11 +776,12 @@ def run(config: dict) -> dict[str, dict[str, dict[str, float]]]:
     # model keeps its native sampler, architecture and one-negative BCE loss.
     enabled_additional = list(
         config.get("additional_baselines", {}).get(
-            "enabled", ["edgebank", "dyrep", "tgn", "cawn", "tcl", "graphmixer", "dygformer"]
+            "enabled",
+            ["edgebank", "jodie", "dyrep", "tgn", "cawn", "tcl", "graphmixer", "dygformer"],
         )
     )
     supported_additional = {
-        "edgebank", "dyrep", "tgn", "cawn", "tcl", "graphmixer", "dygformer"
+        "edgebank", "jodie", "dyrep", "tgn", "cawn", "tcl", "graphmixer", "dygformer"
     }
     unknown = set(enabled_additional) - supported_additional
     if unknown:
@@ -678,44 +789,47 @@ def run(config: dict) -> dict[str, dict[str, dict[str, float]]]:
     enabled_additional = [name for name in enabled_additional if should_run(name)]
 
     if "edgebank" in enabled_additional:
-        edge_bank = EdgeBankLinkBaseline(
-            num_nodes=graph.num_nodes,
-            **dict(config.get("edgebank", {})),
-            **link_cfg,
-        ).to(device)
-        edge_bank.eval()
+        meter = EfficiencyMeter(device)
+        with meter.measure("setup"):
+            edge_bank = EdgeBankLinkBaseline(
+                num_nodes=graph.num_nodes,
+                **dict(config.get("edgebank", {})),
+                **link_cfg,
+            ).to(device)
+            edge_bank.eval()
         if negative_edge_table is not None:
             edge_bank.negative_edge_table = negative_edge_table
-        edge_validation = edge_bank.evaluate_protocol(
-            split.validation,
-            split.train,
-            query_seed=int(shared_training.get("validation_query_seed", 0)),
-        )
-        edge_test = edge_bank.evaluate_protocol(
-            split.test,
-            [*split.train, *split.validation],
-            query_seed=int(shared_training.get("test_query_seed", 2)),
-        )
+        with meter.measure("final_validation"):
+            edge_validation = edge_bank.evaluate_protocol(
+                split.validation,
+                split.train,
+                query_seed=int(shared_training.get("validation_query_seed", 0)),
+            )
+        with meter.measure("test"):
+            edge_test = edge_bank.evaluate_protocol(
+                split.test,
+                [*split.train, *split.validation],
+                query_seed=int(shared_training.get("test_query_seed", 2)),
+            )
         edge_test["best_epoch"] = 0.0
-        result["edgebank"] = {
-            "validation": edge_validation,
-            "test": edge_test,
-        }
+        store("edgebank", edge_bank, meter, edge_validation, edge_test)
         del edge_bank
         release_device_memory(device)
 
-    for baseline_name in ["dyrep", "tgn", "cawn", "tcl", "graphmixer", "dygformer"]:
+    for baseline_name in ["jodie", "dyrep", "tgn", "cawn", "tcl", "graphmixer", "dygformer"]:
         if baseline_name not in enabled_additional:
             continue
         torch.manual_seed(seed)
-        baseline_model = DyGLibLinkBaseline(
-            model_name=baseline_name,
-            feature_dim=graph.feature_dim,
-            num_nodes=graph.num_nodes,
-            **dict(config.get(baseline_name, {})),
-            **link_cfg,
-        ).to(device)
-        baseline_model.prepare_streams(graph.snapshots, train_snapshots)
+        meter = EfficiencyMeter(device)
+        with meter.measure("setup"):
+            baseline_model = DyGLibLinkBaseline(
+                model_name=baseline_name,
+                feature_dim=graph.feature_dim,
+                num_nodes=graph.num_nodes,
+                **dict(config.get(baseline_name, {})),
+                **link_cfg,
+            ).to(device)
+            baseline_model.prepare_streams(graph.snapshots, train_snapshots)
         baseline_training = {
             **shared_training,
             **dict(config.get(f"{baseline_name}_training", {})),
@@ -727,11 +841,9 @@ def run(config: dict) -> dict[str, dict[str, dict[str, float]]]:
             baseline_training,
             seed,
             negative_edge_table,
+            meter,
         )
-        result[baseline_name] = {
-            "validation": baseline_validation,
-            "test": baseline_test,
-        }
+        store(baseline_name, baseline_model, meter, baseline_validation, baseline_test)
         del baseline_model
         release_device_memory(device)
 
@@ -757,11 +869,13 @@ def run(config: dict) -> dict[str, dict[str, dict[str, float]]]:
         if baseline_name not in enabled_snapshot_ssl or not should_run(baseline_name):
             continue
         torch.manual_seed(seed)
-        baseline_model = snapshot_ssl_classes[baseline_name](
-            feature_dim=graph.feature_dim,
-            **dict(config.get(baseline_name, {})),
-            **link_cfg,
-        ).to(device)
+        meter = EfficiencyMeter(device)
+        with meter.measure("setup"):
+            baseline_model = snapshot_ssl_classes[baseline_name](
+                feature_dim=graph.feature_dim,
+                **dict(config.get(baseline_name, {})),
+                **link_cfg,
+            ).to(device)
         baseline_training = {
             **dict(config.get("snapshot_ssl_training", {})),
             **dict(config.get(f"{baseline_name}_training", {})),
@@ -773,22 +887,38 @@ def run(config: dict) -> dict[str, dict[str, dict[str, float]]]:
             baseline_training,
             seed,
             negative_edge_table,
+            meter,
         )
-        result[baseline_name] = {
-            "validation": baseline_validation,
-            "test": baseline_test,
-        }
+        store(baseline_name, baseline_model, meter, baseline_validation, baseline_test)
         del baseline_model
         release_device_memory(device)
 
     if should_run("rcps_jepa"):
         torch.manual_seed(seed)
-        rcps_model = RCPSJEPA(feature_dim=graph.feature_dim, **rcps_args).to(device)
-        rcps_model.prepare_causal_history(graph.snapshots)
+        meter = EfficiencyMeter(device)
+        with meter.measure("setup"):
+            rcps_model = RCPSJEPA(feature_dim=graph.feature_dim, **rcps_args).to(device)
+        if ablation:
+            print(
+                json.dumps(
+                    {
+                        "model": "rcps_jepa",
+                        "ablation": ablation.get("name"),
+                        "flags": rcps_model.ablation_flags(),
+                        "training": {
+                            key: rcps_training[key]
+                            for key in ablation.get("rcps_training", {})
+                        },
+                    }
+                ),
+                flush=True,
+            )
+        with meter.measure("setup"):
+            rcps_model.prepare_causal_history(graph.snapshots)
         rcps_validation, rcps_test = _train_one(
-            "rcps_jepa", rcps_model, split, rcps_training, seed, negative_edge_table
+            "rcps_jepa", rcps_model, split, rcps_training, seed, negative_edge_table, meter
         )
-        result["rcps_jepa"] = {"validation": rcps_validation, "test": rcps_test}
+        store("rcps_jepa", rcps_model, meter, rcps_validation, rcps_test)
         del rcps_model
         release_device_memory(device)
 
@@ -933,10 +1063,10 @@ def _dataset_configs(config: dict) -> list[tuple[str, dict]]:
     negative_strategy = _negative_strategy(base)
     expanded: list[tuple[str, dict]] = []
     seen: set[str] = set()
-    # JODIE consumes the original event width. TGAT and all DyGLib backbones,
-    # including DyRep, retain the repository's shared 172-D width and zero-pad
-    # lower-dimensional event features in their adapters.
-    feature_consumers = ("jodie",)
+    # The author JODIE consumes the original event width. TGAT and all DyGLib
+    # backbones (DyGLib's JODIE included) retain the repository's shared 172-D
+    # width and zero-pad lower-dimensional event features in their adapters.
+    feature_consumers = ("jodie_author",)
     for raw_entry in entries:
         if not isinstance(raw_entry, dict):
             raise ValueError("each datasets entry must be a mapping")
@@ -976,7 +1106,7 @@ def _dataset_configs(config: dict) -> list[tuple[str, dict]]:
                     )
         for section in feature_consumers:
             current.setdefault(section, {})["interaction_feature_dim"] = interaction_dim
-        current.setdefault("jodie", {})["state_change"] = state_change
+        current.setdefault("jodie_author", {})["state_change"] = state_change
         _deep_update(current, dict(overrides))
         expanded.append((name, current))
 
@@ -989,7 +1119,7 @@ def _dataset_configs(config: dict) -> list[tuple[str, dict]]:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Compare temporal link predictors and RCPS-JEPA under one protocol"
+        description="Compare temporal link predictors and DyGJEPA under one protocol"
     )
     parser.add_argument("--config", type=Path, default=Path("configs/link_comparison_wikipedia.yaml"))
     parser.add_argument("--epochs", type=int, default=None, help="override comparison epochs")
@@ -1076,14 +1206,21 @@ def main() -> None:
     if args.output is not None:
         if config.get("datasets"):
             config["output_dir"] = str(args.output)
-            config["summary_output_path"] = str(
-                args.output / "link_comparison_all.json"
+            # Keep per-model summaries apart when --output-name is also given;
+            # otherwise every model run in the same directory would overwrite
+            # the same link_comparison_all.json.
+            summary_name = (
+                f"{args.output_name}_summary.json"
+                if args.output_name is not None
+                else "link_comparison_all.json"
             )
+            config["summary_output_path"] = str(args.output / summary_name)
         else:
             config["output_path"] = str(args.output)
     if args.epochs is not None:
         for model_name in [
             "jodie",
+            "jodie_author",
             "dyrep",
             "tgat",
             "tgn",
@@ -1099,6 +1236,8 @@ def main() -> None:
             settings["pretrain_epochs"] = args.epochs
             settings["probe_epochs"] = args.epochs
     negative_strategy = _negative_strategy(config)
+    # Fail on a malformed ablation section before any training starts.
+    _rcps_ablation(config)
     if negative_strategy != "random":
         # Validate the switch before any training starts, and keep the result
         # files of non-random protocols apart from the random ones.
@@ -1148,6 +1287,8 @@ def main() -> None:
         }
         if negative_strategy != "random":
             dataset_summary["negative_strategy"] = negative_strategy
+        if config.get("ablation"):
+            dataset_summary["ablation"] = _rcps_ablation(config)
         base_output.parent.mkdir(parents=True, exist_ok=True)
         base_output.write_text(json.dumps(dataset_summary, indent=2))
         dataset_results[dataset_name] = dataset_summary

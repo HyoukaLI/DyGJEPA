@@ -48,7 +48,8 @@ class RCPSPreparedWindow:
     context_snapshots: list[Snapshot]
     target_snapshot: Snapshot
     context_embeddings: Tensor
-    target_embedding: Tensor
+    # None on the causal scoring path, where the target snapshot is never read.
+    target_embedding: Tensor | None
     node_context: Tensor | None = None
     mean_relation_gate: Tensor | None = None
 
@@ -218,6 +219,9 @@ class RCPSJEPA(nn.Module):
         ema_update_per_step: bool = False,
         shuffle_windows: bool = False,
         initial_link_logit_bias: float = -3.0,
+        use_node_trajectories: bool = True,
+        use_path_signature: bool = True,
+        use_relation_subgraph: bool = True,
     ) -> None:
         super().__init__()
         if window_size < 2:
@@ -285,6 +289,14 @@ class RCPSJEPA(nn.Module):
         self.ema_steps_per_epoch = ema_steps_per_epoch
         self.ema_update_per_step = bool(ema_update_per_step)
         self.shuffle_windows = shuffle_windows
+        # Module ablation switches.  Every default keeps the full model; a
+        # disabled module is replaced by zeros of the same width so every
+        # downstream layer keeps its shape, parameter count and initialisation,
+        # i.e. the ablated variant differs from the full model only in the
+        # removed signal.  See ``ablation_flags`` for the recorded settings.
+        self.use_node_trajectories = bool(use_node_trajectories)
+        self.use_path_signature = bool(use_path_signature)
+        self.use_relation_subgraph = bool(use_relation_subgraph)
         self._rwpe_cache: dict[tuple[int, int, str], Tensor] = {}
         self._history_time_to_row: dict[int, int] = {}
         self._history_pair_keys: Tensor | None = None
@@ -444,6 +456,28 @@ class RCPSJEPA(nn.Module):
             torch.tensor([-1.6094379, -2.3025851, -0.3566749])
         )
 
+    def ablation_flags(self) -> dict[str, bool | int | float]:
+        """Settings that remove a module of the full model (for run records)."""
+        return {
+            "use_node_trajectories": self.use_node_trajectories,
+            "use_path_signature": self.use_path_signature,
+            "use_relation_subgraph": self.use_relation_subgraph,
+            "use_causal_history": self.use_causal_history,
+            "history_semantic_dim": self.history_semantic_dim,
+            "id_embedding_dim": (
+                0
+                if self.source_id_embedding is None
+                else int(self.source_id_embedding.embedding_dim)
+            ),
+            "ema_momentum": self.ema_momentum,
+            "node_loss_weight": self.node_loss_weight,
+            "relation_loss_weight": self.relation_loss_weight,
+            "link_loss_weight": self.link_loss_weight,
+            "rank_loss_weight": self.rank_loss_weight,
+            "variance_loss_weight": self.variance_loss_weight,
+            "covariance_loss_weight": self.covariance_loss_weight,
+        }
+
     def _snapshot_input(self, snapshot: Snapshot) -> Tensor:
         num_nodes = snapshot.x.shape[0]
         key = (snapshot.time, snapshot.edge_index.shape[1], str(snapshot.x.device))
@@ -576,7 +610,7 @@ class RCPSJEPA(nn.Module):
                 node_semantic_sum.index_add_(
                     0, edges[1].long(), projected_features
                 )
-            # RCPS remains a discrete-time model: repeated events are retained,
+            # DyGJEPA remains a discrete-time model: repeated events are retained,
             # but recency is measured in snapshot indices rather than exact
             # within-snapshot timestamps.
             times = torch.full_like(pair_count[positions], float(snapshot.time))
@@ -661,7 +695,7 @@ class RCPSJEPA(nn.Module):
             self._history_node_counts,
         )
         if any(value is None for value in tensors):
-            raise RuntimeError("call prepare_causal_history before RCPS training")
+            raise RuntimeError("call prepare_causal_history before DyGJEPA training")
         row = self._history_time_to_row[int(target.time)]
         pair_keys = self._history_pair_keys
         assert pair_keys is not None
@@ -819,7 +853,17 @@ class RCPSJEPA(nn.Module):
         _, hidden = self.graph_gru(sequence)
         return hidden[-1]
 
-    def prepare_window(self, window: Sequence[Snapshot]) -> RCPSPreparedWindow:
+    def prepare_window(
+        self, window: Sequence[Snapshot], *, with_target: bool = True
+    ) -> RCPSPreparedWindow:
+        """Encode a window.
+
+        ``with_target=False`` is the causal scoring path: the target snapshot is
+        never handed to an encoder, so no parameter ever reads it.  The link
+        score does not depend on the target latents, so scores are unchanged;
+        the point is that the causal boundary becomes auditable and the
+        target-branch cost disappears from inference.
+        """
         if len(window) != self.window_size:
             raise ValueError(f"expected {self.window_size} snapshots")
         context_snapshots = list(window[:-1])
@@ -827,8 +871,10 @@ class RCPSJEPA(nn.Module):
         context_embeddings = torch.stack(
             [self.encode_snapshot(snapshot, target=False) for snapshot in context_snapshots]
         )
-        with torch.no_grad():
-            target_embedding = self.encode_snapshot(target_snapshot, target=True)
+        target_embedding = None
+        if with_target:
+            with torch.no_grad():
+                target_embedding = self.encode_snapshot(target_snapshot, target=True)
         return RCPSPreparedWindow(
             context_snapshots=context_snapshots,
             target_snapshot=target_snapshot,
@@ -858,14 +904,26 @@ class RCPSJEPA(nn.Module):
         global_node_context, _ = self._node_context(prepared)
         node_u_context = global_node_context[pairs[:, 0]]
         node_v_context = global_node_context[pairs[:, 1]]
-        graph_context = self._pool_relation_context(context_embeddings, context_nodes, context_mask)
+        if self.use_relation_subgraph:
+            graph_context = self._pool_relation_context(
+                context_embeddings, context_nodes, context_mask
+            )
+        else:
+            # The pair-conditioned subgraph still defines the coverage
+            # statistic of the pair path; only its pooled embedding is removed.
+            graph_context = global_node_context.new_zeros(pairs.shape[0], self.hidden_dim)
 
-        raw_increments = temporal_pair_increments(
-            context_snapshots, pairs, context_nodes, self.undirected
-        )
-        projected_increments = self.event_projector(raw_increments)
-        signature = truncated_signature(projected_increments, self.signature_depth)
-        signature_context = self.signature_projector(signature)
+        if self.use_path_signature:
+            raw_increments = temporal_pair_increments(
+                context_snapshots, pairs, context_nodes, self.undirected
+            )
+            projected_increments = self.event_projector(raw_increments)
+            signature = truncated_signature(projected_increments, self.signature_depth)
+            signature_context = self.signature_projector(signature)
+        else:
+            signature_context = global_node_context.new_zeros(
+                pairs.shape[0], self.hidden_dim
+            )
 
         endpoint_state = self._directed_pair_state(node_u_context, node_v_context)
         relation_context = self.online_relation_encoder(endpoint_state)
@@ -896,11 +954,17 @@ class RCPSJEPA(nn.Module):
         node_v_prediction = self._predict_node_future(node_v_context, expanded_horizon)
         relation_prediction = self.relation_predictor(future)
 
-        node_u_target = target_embedding[pairs[:, 0]].detach()
-        node_v_target = target_embedding[pairs[:, 1]].detach()
-        target_endpoint_state = self._directed_pair_state(node_u_target, node_v_target)
-        with torch.no_grad():
-            relation_target = self.target_relation_encoder(target_endpoint_state)
+        if target_embedding is None:
+            # Causal scoring path: no target latent is built, so the target
+            # relation encoder is not run either.  Nothing below consumes these.
+            empty = pairs.new_zeros((pairs.shape[0], 0), dtype=context_embeddings.dtype)
+            node_u_target = node_v_target = relation_target = empty
+        else:
+            node_u_target = target_embedding[pairs[:, 0]].detach()
+            node_v_target = target_embedding[pairs[:, 1]].detach()
+            target_endpoint_state = self._directed_pair_state(node_u_target, node_v_target)
+            with torch.no_grad():
+                relation_target = self.target_relation_encoder(target_endpoint_state)
 
         intensity_input = torch.cat(
             [relation_context, history_context, context], dim=-1
@@ -982,6 +1046,10 @@ class RCPSJEPA(nn.Module):
     def _node_predictions(
         self, prepared: RCPSPreparedWindow
     ) -> RCPSNodeOutput:
+        if prepared.target_embedding is None:
+            raise ValueError(
+                "node predictions require prepare_window(..., with_target=True)"
+            )
         node_context, mean_gate = self._node_context(prepared)
         horizon = max(
             1,
@@ -1018,36 +1086,62 @@ class RCPSJEPA(nn.Module):
             gate = prepared.mean_relation_gate
             return prepared.node_context, gate
 
-        _, individual_hidden = self.node_gru(prepared.context_embeddings)
-        history_scale = torch.sigmoid(self.node_history_logit)
-        homophily_scale = torch.sigmoid(self.node_homophily_logit)
-        views = self._content_views(prepared.context_snapshots[-1])
-        hop1, hop2 = views["hop1"], views["hop2"]
-        individual_context = self.node_history_norm(
-            prepared.context_embeddings[-1]
-            + history_scale * individual_hidden[-1]
-            + homophily_scale * 0.5 * (hop1 + hop2)
+        node_context, relation_gate = self._fuse_node_context(
+            prepared.context_snapshots, prepared.context_embeddings
         )
 
+        prepared.node_context = node_context
+        prepared.mean_relation_gate = relation_gate.detach().mean()
+        return node_context, relation_gate.detach().mean()
+
+    def _node_trajectories(
+        self, snapshots: Sequence[Snapshot], embeddings: Tensor
+    ) -> tuple[Tensor, Tensor]:
+        """Individual (GRU over own latents) and relational (GRU over neighbour
+        means) trajectory states of every node over the context snapshots."""
+        if not self.use_node_trajectories:
+            zeros = embeddings.new_zeros(embeddings.shape[1], self.hidden_dim)
+            return zeros, zeros
+        _, individual_hidden = self.node_gru(embeddings)
         neighbor_sequence = torch.stack(
             [
                 neighbor_mean_embeddings(snapshot, embedding, self.undirected)
-                for snapshot, embedding in zip(
-                    prepared.context_snapshots, prepared.context_embeddings.unbind(dim=0)
-                )
+                for snapshot, embedding in zip(snapshots, embeddings.unbind(dim=0))
             ],
             dim=0,
         )
         _, relation_hidden = self.node_relation_gru(neighbor_sequence)
-        relation_context = relation_hidden[-1]
+        return individual_hidden[-1], relation_hidden[-1]
 
-        raw_increments = temporal_node_increments(
-            prepared.context_snapshots, self.undirected
-        )
+    def _node_signature_context(
+        self, snapshots: Sequence[Snapshot], embeddings: Tensor
+    ) -> Tensor:
+        """Projected truncated signature of every node's structural path."""
+        if not self.use_path_signature:
+            return embeddings.new_zeros(embeddings.shape[1], self.hidden_dim)
+        raw_increments = temporal_node_increments(snapshots, self.undirected)
         projected_increments = self.node_event_projector(raw_increments)
         node_signature = truncated_signature(projected_increments, self.signature_depth)
-        signature_context = self.node_signature_projector(node_signature)
+        return self.node_signature_projector(node_signature)
 
+    def _fuse_node_context(
+        self, snapshots: Sequence[Snapshot], embeddings: Tensor
+    ) -> tuple[Tensor, Tensor]:
+        """Shared node-context fusion for the JEPA context branch and the
+        downstream temporal readout; returns the context and its gate."""
+        individual_hidden, relation_context = self._node_trajectories(
+            snapshots, embeddings
+        )
+        history_scale = torch.sigmoid(self.node_history_logit)
+        homophily_scale = torch.sigmoid(self.node_homophily_logit)
+        views = self._content_views(snapshots[-1])
+        hop1, hop2 = views["hop1"], views["hop2"]
+        individual_context = self.node_history_norm(
+            embeddings[-1]
+            + history_scale * individual_hidden
+            + homophily_scale * 0.5 * (hop1 + hop2)
+        )
+        signature_context = self._node_signature_context(snapshots, embeddings)
         fusion_input = torch.cat(
             [individual_context, relation_context, signature_context], dim=-1
         )
@@ -1056,10 +1150,7 @@ class RCPSJEPA(nn.Module):
         node_context = self.node_context_norm(
             individual_context + relation_gate * relation_update
         )
-
-        prepared.node_context = node_context
-        prepared.mean_relation_gate = relation_gate.detach().mean()
-        return node_context, relation_gate.detach().mean()
+        return node_context, relation_gate
 
     def node_loss_windows(
         self,
@@ -1141,34 +1232,8 @@ class RCPSJEPA(nn.Module):
         embeddings = torch.stack(
             [self.encode_snapshot(snapshot, target=False) for snapshot in snapshots]
         )
-        _, individual_hidden = self.node_gru(embeddings)
-        history_scale = torch.sigmoid(self.node_history_logit)
-        homophily_scale = torch.sigmoid(self.node_homophily_logit)
-        views = self._content_views(snapshots[-1])
-        individual_context = self.node_history_norm(
-            embeddings[-1]
-            + history_scale * individual_hidden[-1]
-            + homophily_scale * 0.5 * (views["hop1"] + views["hop2"])
-        )
-        neighbor_sequence = torch.stack(
-            [
-                neighbor_mean_embeddings(snapshot, embedding, self.undirected)
-                for snapshot, embedding in zip(snapshots, embeddings.unbind(dim=0))
-            ],
-            dim=0,
-        )
-        _, relation_hidden = self.node_relation_gru(neighbor_sequence)
-        relation_context = relation_hidden[-1]
-        raw_increments = temporal_node_increments(snapshots, self.undirected)
-        projected_increments = self.node_event_projector(raw_increments)
-        node_signature = truncated_signature(projected_increments, self.signature_depth)
-        signature_context = self.node_signature_projector(node_signature)
-        fusion_input = torch.cat(
-            [individual_context, relation_context, signature_context], dim=-1
-        )
-        relation_update = self.node_context_encoder(fusion_input)
-        relation_gate = torch.sigmoid(self.node_context_gate(fusion_input))
-        return self.node_context_norm(individual_context + relation_gate * relation_update)
+        node_context, _ = self._fuse_node_context(snapshots, embeddings)
+        return node_context
 
     def fuse_homophily(self, hop: Tensor, temporal: Tensor) -> Tensor:
         scale = torch.sigmoid(self.homophily_residual_logit)
@@ -1333,7 +1398,7 @@ class RCPSJEPA(nn.Module):
                 )
                 if not torch.isfinite(loss):
                     raise RuntimeError(
-                        f"RCPS-JEPA produced a non-finite loss at train batch {steps}"
+                        f"DyGJEPA produced a non-finite loss at train batch {steps}"
                     )
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(self.parameters(), float(grad_clip))
@@ -1461,6 +1526,43 @@ class RCPSJEPA(nn.Module):
             target.data.mul_(momentum).add_(online.data, alpha=1.0 - momentum)
 
     @torch.no_grad()
+    @torch.no_grad()
+    def score_windows(
+        self,
+        windows: Sequence[Sequence[Snapshot]],
+        pair_batch_size: int | None = None,
+        query_seed: int = 42,
+    ) -> tuple[Tensor, Tensor, Tensor]:
+        """Causal scoring path: return (probability, label, group) without ever
+        reading the target snapshot.
+
+        This is the inference procedure the paper describes.  It differs from
+        :meth:`evaluate_windows` only in that ``prepare_window`` is called with
+        ``with_target=False``, so neither the target encoder nor the target
+        relation encoder is invoked and the target snapshot is not handed to any
+        parameter.  Scores are identical to ``evaluate_windows``; see
+        ``tests/test_causal_scoring_path.py``.
+        """
+        probabilities, labels, groups = [], [], []
+        group_offset = 0
+        for window_index, window in enumerate(windows):
+            queries = self.sample_queries(window, query_seed + window_index)
+            prepared = self.prepare_window(window, with_target=False)
+            size = queries.pairs.shape[0] if pair_batch_size is None else pair_batch_size
+            for start in range(0, queries.pairs.shape[0], size):
+                pairs = queries.pairs[start : start + size]
+                timestamps = (
+                    None
+                    if queries.timestamps is None
+                    else queries.timestamps[start : start + size]
+                )
+                output = self._forward_prepared(prepared, pairs, timestamps=timestamps)
+                probabilities.append(output.probability)
+                labels.append(queries.labels[start : start + size])
+                groups.append(queries.group_ids[start : start + size] + group_offset)
+            group_offset += int(queries.group_ids.max().item()) + 1
+        return torch.cat(probabilities), torch.cat(labels), torch.cat(groups)
+
     def evaluate_windows(
         self,
         windows: Sequence[Sequence[Snapshot]],

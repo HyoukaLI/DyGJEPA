@@ -1,0 +1,28 @@
+# Noise-robustness evaluation (DyG-Mamba §5.5): models are trained on the
+# clean data with the main protocol, then the selected checkpoint is re-scored
+# on the clean test positives while 10%-60% random noisy events are inserted
+# into the history it sees (see jepa_compare/compare_link_robustness.py).
+#
+# Overlay of link_comparison_all.yaml: every dataset entry and model recipe is
+# inherited.  Datasets are always named explicitly:
+#   bash scripts/run_link_robustness.sh wikipedia
+#   python -m jepa_compare.compare_link_robustness --config configs/link_comparison_all_robustness.yaml --datasets wikipedia
+base_config: link_comparison_all.yaml
+
+# Two continuous-time baselines, one self-supervised snapshot baseline, ours.
+models: [tgn, tgat, dvgmae, rcps_jepa]
+seed: [42]
+
+output_dir: results/robustness
+summary_output_path: results/robustness/link_comparison_all.json
+
+robustness:
+  noise_rates: [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6]
+  # Seed of the noise generator; the same noisy stream is shown to every model.
+  noise_seed: 0
+  # Edge features of noisy events: resample (copied from real events of the
+  # same bin, harder to filter out) or zeros.
+  noise_features: resample
+
+wandb:
+  tags: [robustness]

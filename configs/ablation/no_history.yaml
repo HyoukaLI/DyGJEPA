@@ -1,0 +1,24 @@
+# DyGJEPA ablation 'no_history': w/o historical context: no causal event-prefix features, so neither the history latent mu nor the recurrence prior enters the link head (history_semantic_dim is irrelevant here).
+#
+# Overlay of link_comparison_all.yaml: every dataset entry, model recipe and
+# the DyGLib random-negative protocol are inherited; ablation.* is applied
+# after the per-dataset overrides so the same module is removed everywhere.
+# Launch with
+#   bash scripts/run_link_ablation.sh no_history [datasets...]
+#   VARIANT=no_history sbatch run_link_ablation.sbatch
+base_config: ../link_comparison_all.yaml
+
+models: [rcps_jepa]
+# Same seeds as the main table runs.
+seed: [42, 44, 46, 48, 50]
+
+output_dir: results/ablation/no_history
+summary_output_path: results/ablation/no_history/link_comparison_all.json
+
+ablation:
+  name: no_history
+  rcps_jepa:
+    use_causal_history: false
+
+wandb:
+  tags: [ablation, no_history]

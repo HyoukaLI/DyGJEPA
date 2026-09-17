@@ -1,0 +1,27 @@
+# DyGJEPA ablation 'no_jepa': w/o JEPA objectives: node, relation, variance and covariance losses are zero, leaving a purely supervised link model with the same architecture.
+#
+# Overlay of link_comparison_all.yaml: every dataset entry, model recipe and
+# the DyGLib random-negative protocol are inherited; ablation.* is applied
+# after the per-dataset overrides so the same module is removed everywhere.
+# Launch with
+#   bash scripts/run_link_ablation.sh no_jepa [datasets...]
+#   VARIANT=no_jepa sbatch run_link_ablation.sbatch
+base_config: ../link_comparison_all.yaml
+
+models: [rcps_jepa]
+# Same seeds as the main table runs.
+seed: [42, 44, 46, 48, 50]
+
+output_dir: results/ablation/no_jepa
+summary_output_path: results/ablation/no_jepa/link_comparison_all.json
+
+ablation:
+  name: no_jepa
+  rcps_jepa:
+    node_loss_weight: 0.0
+    relation_loss_weight: 0.0
+    variance_loss_weight: 0.0
+    covariance_loss_weight: 0.0
+
+wandb:
+  tags: [ablation, no_jepa]

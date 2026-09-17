@@ -1,0 +1,24 @@
+# DyGJEPA ablation 'no_trajectories': w/o node trajectories: the individual GRU state (eta) and the relational GRU state (rho) are replaced by zeros in the node context.
+#
+# Overlay of link_comparison_all.yaml: every dataset entry, model recipe and
+# the DyGLib random-negative protocol are inherited; ablation.* is applied
+# after the per-dataset overrides so the same module is removed everywhere.
+# Launch with
+#   bash scripts/run_link_ablation.sh no_trajectories [datasets...]
+#   VARIANT=no_trajectories sbatch run_link_ablation.sbatch
+base_config: ../link_comparison_all.yaml
+
+models: [rcps_jepa]
+# Same seeds as the main table runs.
+seed: [42, 44, 46, 48, 50]
+
+output_dir: results/ablation/no_trajectories
+summary_output_path: results/ablation/no_trajectories/link_comparison_all.json
+
+ablation:
+  name: no_trajectories
+  rcps_jepa:
+    use_node_trajectories: false
+
+wandb:
+  tags: [ablation, no_trajectories]

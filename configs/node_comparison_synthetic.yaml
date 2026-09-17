@@ -105,8 +105,8 @@ training:
   selection_probe_epochs: 50
   probe_epochs: 100
   probe_hidden_dim: 32
-  rcps_multiscale_views: [hop2, hop8]
-  rcps_checkpoint_views: [fused]
+  rcps_multiscale_views: [prediction, encoder]
+  rcps_checkpoint_views: [prediction, encoder]
 
 # Weights & Biases (off by default).  Enable with --wandb on the command line
 # or DYGJEPA_WANDB=1 in the environment.  mode: auto tries an online run first

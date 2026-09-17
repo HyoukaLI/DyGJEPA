@@ -1,0 +1,18 @@
+# DyGJEPA ablation 'no_relation_branch': w/o the relation predictive branch: alpha_rel = 0 only.  Doubles as
+# control (b) of the relation-target leakage appendix -- it removes the only
+# training signal that reads G_t through the pair composition.
+#
+# Overlay of link_comparison_all.yaml: every dataset entry, model recipe and
+# the DyGLib random-negative protocol are inherited; ablation.* is applied
+# after the per-dataset overrides so the same module is removed everywhere.
+base_config: ../link_comparison_all.yaml
+models: [rcps_jepa]
+seed: [42, 44, 46, 48, 50]
+output_dir: results/ablation/no_relation_branch
+summary_output_path: results/ablation/no_relation_branch/link_comparison_all.json
+ablation:
+  name: no_relation_branch
+  rcps_jepa:
+    relation_loss_weight: 0.0
+wandb:
+  tags: [ablation, no_relation_branch]

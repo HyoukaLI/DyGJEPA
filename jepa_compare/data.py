@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import warnings
 from dataclasses import dataclass
 from pathlib import Path
@@ -167,13 +168,23 @@ def load_npz(path: str | Path) -> DynamicGraph:
     raw = np.load(Path(path), allow_pickle=True)
     features = raw["features"]
     if "feature_source" in raw and str(raw["feature_source"]) == "structural-fallback":
-        warnings.warn(
+        message = (
             f"{path} carries the 4-D structural fallback instead of SpikeNet DeepWalk "
             "features; node-classification results will NOT match the SG-JEPA/SpikeNet "
             "protocol (every model degenerates to the majority class). Rebuild the archive "
-            "with the <dataset>.npy features (see data/README.md).",
-            RuntimeWarning,
-            stacklevel=2,
+            "with the <dataset>.npy features (python scripts/prepare_spikenet_node.py "
+            "--dataset <dataset>, or scripts/prepare_dblp.py). Set "
+            "DYGJEPA_ALLOW_STRUCTURAL_FALLBACK=1 to run the fallback protocol on purpose."
+        )
+        if os.environ.get("DYGJEPA_ALLOW_STRUCTURAL_FALLBACK", "0") != "1":
+            raise RuntimeError(message)
+        warnings.warn(message, RuntimeWarning, stacklevel=2)
+    if features.ndim == 3 and any(not np.any(features[t]) for t in range(features.shape[0])):
+        raise RuntimeError(
+            f"{path}: at least one snapshot has all-zero node features; the archive "
+            "was built from an unfinished DeepWalk .npy (pre-allocated but never "
+            "filled). Replace data/raw/<dataset>/<dataset>.npy with the complete "
+            "features and rebuild the archive."
         )
     active = raw["active"] if "active" in raw else np.ones(features.shape[:2], bool)
     snapshots = []
@@ -195,7 +206,7 @@ def load_npz(path: str | Path) -> DynamicGraph:
                 ),
                 query_timestamps=(
                     torch.as_tensor(
-                        np.asarray(raw[f"query_timestamps_{t}"], dtype=np.float32),
+                        np.asarray(raw[f"query_timestamps_{t}"], dtype=np.float64),
                         dtype=torch.float32,
                     )
                     if f"query_timestamps_{t}" in raw

@@ -21,7 +21,18 @@ def test_link_multi_dataset_config_expands_aligned_overrides() -> None:
         "wikipedia", "mooc", "lastfm", "canparl", "contacts", "flights",
         "untrade", "unvote", "uslegis", "enron", "uci",
     }
+    # jodie is DyGLib's memory-model JODIE (shared 172-D width, dataset dropout
+    # from DyGLib's load_configs); jodie_author is the bipartite original.
     assert expanded["wikipedia"]["jodie"]["interaction_feature_dim"] == 172
+    assert expanded["wikipedia"]["jodie"]["dropout"] == 0.1
+    assert expanded["mooc"]["jodie"]["dropout"] == 0.2
+    assert expanded["lastfm"]["jodie"]["dropout"] == 0.3
+    assert expanded["canparl"]["jodie"]["dropout"] == 0.0
+    assert expanded["uci"]["jodie"]["dropout"] == 0.4
+    assert expanded["untrade"]["jodie"]["dropout"] == 0.4
+    assert expanded["uslegis"]["jodie"]["dropout"] == 0.2
+    assert expanded["enron"]["jodie"]["dropout"] == 0.1
+    assert expanded["wikipedia"]["jodie_author"]["interaction_feature_dim"] == 172
     assert expanded["wikipedia"]["rcps_jepa"]["hidden_dim"] == 128
     assert expanded["wikipedia"]["rcps_jepa"]["id_embedding_dim"] == 128
     assert expanded["wikipedia"]["rcps_jepa"]["id_embedding_dropout"] == 0.2
@@ -30,9 +41,11 @@ def test_link_multi_dataset_config_expands_aligned_overrides() -> None:
     assert expanded["wikipedia"]["rcps_jepa"]["rank_loss_weight"] == 1.0
     assert expanded["wikipedia"]["rcps_training"]["pair_batch_size"] == 500
     assert expanded["wikipedia"]["rcps_training"]["learning_rate"] == 0.0001
-    assert expanded["mooc"]["jodie"]["interaction_feature_dim"] == 4
-    assert expanded["lastfm"]["jodie"]["interaction_feature_dim"] == 2
-    assert expanded["lastfm"]["jodie"]["state_change"] is False
+    assert expanded["mooc"]["jodie"]["interaction_feature_dim"] == 172
+    assert expanded["mooc"]["jodie_author"]["interaction_feature_dim"] == 4
+    assert expanded["lastfm"]["jodie_author"]["interaction_feature_dim"] == 2
+    assert expanded["lastfm"]["jodie_author"]["state_change"] is False
+    assert "state_change" not in expanded["lastfm"]["jodie"]
     assert expanded["mooc"]["tgn"]["interaction_feature_dim"] == 172
     assert expanded["lastfm"]["dygformer"]["interaction_feature_dim"] == 172
     assert expanded["mooc"]["tgat"]["interaction_feature_dim"] == 172
@@ -43,7 +56,11 @@ def test_link_multi_dataset_config_expands_aligned_overrides() -> None:
     assert expanded["lastfm"]["cawn"]["num_neighbors"] == 128
     assert expanded["mooc"]["graphmixer"]["num_neighbors"] == 20
     assert expanded["lastfm"]["dygformer"]["patch_size"] == 16
-    assert "jodie" not in expanded["canparl"]["models"]
+    assert "jodie" in expanded["canparl"]["models"]
+    assert "jodie_author" not in expanded["canparl"]["models"]
+    assert "jodie" in expanded["canparl"]["additional_baselines"]["enabled"]
+    assert expanded["canparl"]["jodie_training"]["epochs"] == 100
+    assert expanded["wikipedia"]["jodie_author_training"]["learning_rate"] == 0.001
     assert "rcps_jepa" in expanded["canparl"]["models"]
     assert expanded["canparl"]["tgat"]["uniform_neighbors"] is True
     assert expanded["canparl"]["dyrep"]["sample_neighbor_strategy"] == "uniform"

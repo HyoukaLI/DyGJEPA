@@ -1,0 +1,21 @@
+# Efficiency comparison: one seed, every model, same GPU, same protocol as the
+# main run.  Overlay of link_comparison_all.yaml, so every dataset entry, model
+# recipe and optimizer setting is inherited; only the seed list and the result
+# location change.  Every run of the comparison already records an
+# ``efficiency`` block per model (parameters, seconds per epoch, time to the
+# selected checkpoint, test inference time, peak GPU memory - see
+# jepa_compare/efficiency.py); this overlay exists so those numbers come from
+# one dedicated pass on one device rather than from the multi-seed main runs.
+#
+#   bash scripts/run_link_efficiency.sh enron wikipedia
+#   DATASET_NAMES="enron wikipedia" sbatch run_link_efficiency.sbatch
+#   python scripts/summarize_efficiency.py --results results/efficiency --plot
+base_config: link_comparison_all.yaml
+
+seed: [42]
+
+output_dir: results/efficiency
+summary_output_path: results/efficiency/link_comparison_all.json
+
+wandb:
+  tags: [efficiency]

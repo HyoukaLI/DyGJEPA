@@ -1,4 +1,4 @@
-"""SG-JEPA reproduction and RCPS-JEPA comparison package."""
+"""SG-JEPA reproduction and DyGJEPA comparison package."""
 
 from .data import DynamicGraph, Snapshot
 from .jodie_baseline import JODIELinkBaseline

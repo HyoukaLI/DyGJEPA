@@ -1,0 +1,24 @@
+# DyGJEPA ablation 'no_subgraph': w/o pair-conditioned subgraph context: the pooled/GRU subgraph embedding g_uv is replaced by zeros (the subgraph still defines the coverage statistic of the pair path).
+#
+# Overlay of link_comparison_all.yaml: every dataset entry, model recipe and
+# the DyGLib random-negative protocol are inherited; ablation.* is applied
+# after the per-dataset overrides so the same module is removed everywhere.
+# Launch with
+#   bash scripts/run_link_ablation.sh no_subgraph [datasets...]
+#   VARIANT=no_subgraph sbatch run_link_ablation.sbatch
+base_config: ../link_comparison_all.yaml
+
+models: [rcps_jepa]
+# Same seeds as the main table runs.
+seed: [42, 44, 46, 48, 50]
+
+output_dir: results/ablation/no_subgraph
+summary_output_path: results/ablation/no_subgraph/link_comparison_all.json
+
+ablation:
+  name: no_subgraph
+  rcps_jepa:
+    use_relation_subgraph: false
+
+wandb:
+  tags: [ablation, no_subgraph]

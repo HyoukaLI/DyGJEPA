@@ -1,0 +1,19 @@
+# DyGJEPA ablation 'no_vicreg': w/o collapse regularisation: the variance and covariance terms are
+# zero while the node and relation predictive losses stay on.  Isolates L_reg,
+# which no_jepa removes only jointly.  Backs the collapse diagnostics appendix.
+#
+# Overlay of link_comparison_all.yaml: every dataset entry, model recipe and
+# the DyGLib random-negative protocol are inherited; ablation.* is applied
+# after the per-dataset overrides so the same module is removed everywhere.
+base_config: ../link_comparison_all.yaml
+models: [rcps_jepa]
+seed: [42, 44, 46, 48, 50]
+output_dir: results/ablation/no_vicreg
+summary_output_path: results/ablation/no_vicreg/link_comparison_all.json
+ablation:
+  name: no_vicreg
+  rcps_jepa:
+    variance_loss_weight: 0.0
+    covariance_loss_weight: 0.0
+wandb:
+  tags: [ablation, no_vicreg]

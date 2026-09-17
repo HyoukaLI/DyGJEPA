@@ -1,23 +1,25 @@
 #!/bin/bash
 #SBATCH --job-name=jepa_deepwalk
+#SBATCH --array=0-2
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=64G
 #SBATCH --qos=work
 #SBATCH --time=48:00:00
-#SBATCH --output=logs/%x-%j.out
-#SBATCH --error=logs/%x-%j.err
+#SBATCH --output=logs/%x-%A_%a.out
+#SBATCH --error=logs/%x-%A_%a.err
 
 # Generate the SpikeNet DeepWalk node features data/raw/<dataset>/<dataset>.npy
 # ([T, N, 80]) that the SG-JEPA paper protocol requires, then rebuild the NPZ.
 #
-#   DATASET=tmall  sbatch generate_node_features.sbatch
-#   DATASET=patent sbatch generate_node_features.sbatch
-#   DATASET=dblp   sbatch generate_node_features.sbatch
+#   mkdir -p logs                                     # Slurm does not create it
+#   sbatch generate_node_features.sbatch              # all three (array 0=dblp 1=tmall 2=patent)
+#   sbatch --array=1 generate_node_features.sbatch    # tmall only
+#   sbatch --array=1,2 generate_node_features.sbatch  # tmall + patent
 #
-# The job is resumable: finished snapshots are recorded next to the .npy, so
-# re-submitting after a time-out continues with the missing ones.  Walk corpora
-# are streamed to SCRATCH_DIR (Patent: ~25 GB per snapshot, deleted after use).
-# Requires the feature extras: pip install -e '.[features]'  (gensim numba scipy tqdm)
+# CPU only (no GPU needed).  Resumable: finished snapshots are recorded next to
+# the .npy, so re-submitting after a time-out continues with the missing ones.
+# Walk corpora are streamed to SCRATCH_DIR (Patent: ~25 GB per snapshot, deleted
+# after use).  Requires the feature extras: pip install -e '.[features]'
 
 set -euo pipefail
 module purge
@@ -30,7 +32,8 @@ export OMP_NUM_THREADS="${SLURM_CPUS_PER_TASK:-16}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="${PROJECT_DIR:-$SCRIPT_DIR}"
 PYTHON_BIN="${PYTHON_BIN:-/export/home/s5304639/.conda/envs/trg/bin/python}"
-DATASET="${DATASET:-tmall}"
+DATASETS=(dblp tmall patent)
+DATASET="${DATASET:-${DATASETS[${SLURM_ARRAY_TASK_ID:-1}]}}"
 SCRATCH_DIR="${SCRATCH_DIR:-${TMPDIR:-$PROJECT_DIR/data/raw/$DATASET/walks}}"
 
 cd "$PROJECT_DIR"

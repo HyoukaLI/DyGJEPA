@@ -23,3 +23,6 @@ ara-output/
 .DS_Store
 githubkey.pub
 wandb/
+
+# DeepWalk feature arrays are multi-GB; they live on the GitHub release.
+data/processed/*.npy

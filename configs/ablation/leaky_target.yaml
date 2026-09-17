@@ -1,0 +1,19 @@
+# DyGJEPA ablation 'leaky_target': POSITIVE CONTROL, not an ablation: the relation target is augmented with
+# target-snapshot pair statistics, so it does leak.  REQUIRES A CODE CHANGE in
+# rcps_jepa.py (target relation encoder input); the flag below does not exist
+# yet.  Kept here so the experiment is not forgotten.
+#
+# Overlay of link_comparison_all.yaml: every dataset entry, model recipe and
+# the DyGLib random-negative protocol are inherited; ablation.* is applied
+# after the per-dataset overrides so the same module is removed everywhere.
+base_config: ../link_comparison_all.yaml
+models: [rcps_jepa]
+seed: [42, 44, 46, 48, 50]
+output_dir: results/ablation/leaky_target
+summary_output_path: results/ablation/leaky_target/link_comparison_all.json
+ablation:
+  name: leaky_target
+  rcps_jepa:
+    leaky_relation_target: true   # NOT IMPLEMENTED YET
+wandb:
+  tags: [ablation, leaky_target]

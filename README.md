@@ -84,7 +84,7 @@ self-interactions when present in the raw stream), fixed
 validation/test negative seeds `0/2`, and model seeds `0, 1, 2, 3, 4`.
 AP and AUC are averaged over evaluation batches as in DyGLib. MRR and
 Recall@10 are intentionally not computed by this DyGLib-aligned comparison.
-RCPS-JEPA may use multiple random destinations per positive during training as
+DyGJEPA may use multiple random destinations per positive during training as
 a model-specific hyperparameter; validation and test always retain the shared
 one-positive/one-negative protocol.
 
@@ -139,6 +139,92 @@ random protocol and later ones increasingly test whether a model picks up the
 recurrence of edges it never saw in training. Results go to
 `results/inductive/*_inductive.json`.
 
+### DyGJEPA module ablations (separate runs)
+
+Each ablation removes one module of the full model and is otherwise the main
+run: `configs/ablation/<variant>.yaml` is an overlay of
+`link_comparison_all.yaml` (same datasets, recipes, seeds 42/44/46/48/50 and
+random-negative protocol) whose `ablation.rcps_jepa` / `ablation.rcps_training`
+keys are applied *after* the per-dataset overrides, so the module is removed on
+every dataset. Results go to `results/ablation/<variant>/`.
+
+| variant | removes |
+|---|---|
+| `prior_only` | all training (`epochs: 0`): the epoch-0 evaluation of the parameter-free recurrence prior |
+| `no_history` | the causal event-prefix history (history latent and recurrence prior) |
+| `no_signature` | node and pair path signatures |
+| `no_subgraph` | the pair-conditioned subgraph context |
+| `no_trajectories` | the individual and relational GRU trajectories of the node context |
+| `no_jepa` | the JEPA objectives (node, relation, variance, covariance losses): a purely supervised model |
+| `no_id` | the transductive ID embeddings of the link head |
+
+A removed module is replaced by zeros of the same width, so every layer keeps
+its shape and initialisation; with all switches at their defaults the code
+path of the main run is unchanged (`bash scripts/check_rcps_ablation.sh`
+verifies this bit-for-bit against `git HEAD` on CPU).
+
+```bash
+bash scripts/run_link_ablation.sh --list                        # variants
+bash scripts/run_link_ablation.sh no_history wikipedia uci canparl  # datasets are named explicitly
+bash scripts/run_link_ablation.sh no_signature wikipedia canparl
+VARIANT=no_history sbatch run_link_ablation.sbatch              # cluster; DATASET_NAMES/SEEDS/EPOCHS as usual
+python scripts/summarize_ablation.py                            # table vs results/link_comparison_<ds>.json
+python scripts/summarize_ablation.py --metric auc --format latex
+```
+
+### Efficiency (separate run)
+
+Every model of every comparison run now records an `efficiency` block next to
+its `validation` / `test` metrics (`jepa_compare/efficiency.py`): trainable and
+total parameters, setup time, seconds per training epoch, number of epochs run,
+time to the selected checkpoint (setup + pretraining + training epochs and
+validation passes up to `best_epoch`), total training time, final test
+inference time (and examples per second), total wall-clock, and on CUDA the
+peak allocated memory during the run versus the memory already resident before
+it. Phase timings synchronise the device, so the metrics of the comparison are
+unchanged. For the paper the numbers come from one dedicated single-seed pass
+in which every model of a dataset runs sequentially on the same GPU:
+
+```bash
+bash scripts/run_link_efficiency.sh enron wikipedia            # one seed, all models, results/efficiency/
+DATASET_NAMES="enron" sbatch run_link_efficiency.sbatch         # cluster; one job per dataset, same --gres
+python scripts/summarize_efficiency.py --results results/efficiency            # markdown table per dataset
+python scripts/summarize_efficiency.py --results results/efficiency --format latex
+python scripts/summarize_efficiency.py --results results/efficiency --plot     # bubble + relative-cost figures
+```
+
+`configs/link_comparison_all_efficiency.yaml` is an overlay of
+`link_comparison_all.yaml` with `seed: [42]` and `output_dir: results/efficiency`,
+so every recipe is the main run's. Do not split the models of one dataset over
+different GPUs or nodes when timing them.
+
+### Noise robustness (separate run)
+
+DyG-Mamba's robustness test (§5.5): every model is trained and checkpoint-
+selected on the clean data with the main protocol, then the selected checkpoint
+is re-scored on the clean test positives while 10%–60% random noisy events are
+inserted into the history it sees. Noise is generated per snapshot (bin) so the
+binning and the split never move; noisy events enter the context snapshots'
+structure and activity, DyGJEPA's causal event history, and the neighbor
+samplers / event streams of the continuous-time baselines, while the test
+positives and their negatives stay identical across rates
+(`jepa_compare/compare_link_robustness.py`).
+
+```bash
+bash scripts/run_link_robustness.sh wikipedia                       # tgn tgat dvgmae rcps_jepa, rates 0-0.6
+MODELS="rcps_jepa tgn" RATES="0 0.3 0.6" bash scripts/run_link_robustness.sh uci
+EPOCHS=1 MODELS="rcps_jepa dvgmae" bash scripts/run_link_robustness.sh uci  # smoke test
+```
+
+`configs/link_comparison_all_robustness.yaml` (overlay of
+`link_comparison_all.yaml`) fixes the models, one seed, the noise rates, the
+noise seed and how noisy events get edge features (`resample` from real events
+of the same bin, or `zeros`). Results: `results/robustness/link_robustness_<ds>.json`
+(per model: clean test metrics and metrics at every rate), the same as
+`.csv` with the relative AP drop, and `results/robustness/figures/<ds>_noise_ap.{pdf,png}`
+(AP versus noise rate, drop at the last rate annotated). A rate-0 evaluation
+that differs from the training test pass is reported as a warning.
+
 Each model is reinitialized independently for every seed. To override the seed list:
 
 ```bash
@@ -174,6 +260,46 @@ Run all three node-prediction datasets under the same model/probe protocol:
 bash scripts/run_node_datasets.sh
 ```
 
+### Reproducing the node experiments on another machine
+
+`data/raw/` is not in git. Everything needed lives on the GitHub release
+`node-data-v1` (raw SpikeNet files; DeepWalk features when uploaded):
+
+```bash
+git clone git@github.com:HyoukaLI/DyGJEPA.git && cd DyGJEPA
+pip install -e '.[features]'                 # + torch/pyyaml for the runs
+scripts/download_node_data.sh                # data/raw/{dblp,tmall,patent}/...
+# if the release has no <dataset>.npy yet, generate it (CPU, resumable):
+sbatch generate_node_features.sbatch         # array: 0=dblp 1=tmall 2=patent
+# otherwise just build the archives:
+python scripts/prepare_dblp.py
+python scripts/prepare_spikenet_node.py --dataset tmall
+python scripts/prepare_spikenet_node.py --dataset patent
+sbatch run_node_datasets.sbatch              # 3 datasets x 5 seeds
+```
+
+`scripts/upload_node_data.sh` (needs `gh`) publishes the raw files, and with
+`WITH_NPY=1` the generated features split into <2 GB parts, to that release.
+
+### Node datasets on a fresh clone (one command)
+
+```bash
+bash scripts/run_node_datasets.sh tmall      # prepares the data if needed, then trains
+```
+
+When `data/processed/<dataset>.npz` is missing or still carries the 4-D
+structural fallback, the launcher first runs
+`bash scripts/prepare_node_dataset.sh <dataset>`, which (1) takes the raw files
+from the repository (Tmall: `data/raw/tmall/tmall.txt.gz` + `node2label.txt`,
+read transparently) or from the GitHub release (DBLP, Patent), (2) downloads the
+pre-computed DeepWalk features `<dataset>.npy` from the release (split parts are
+reassembled), and (3) builds the archive with them. The downloads need network,
+so on a cluster run the preparation once on a login node before submitting jobs.
+`GENERATE=1` regenerates the features with the official recipe when the release
+has none (hours for Tmall); `AUTO_PREPARE=0` restores the old fail-fast behaviour.
+The rebuilt archives embed the features, so `tmall.npz` grows to about 3.5 GB
+and `patent.npz` to about 11 GB (both are git-ignored).
+
 ### Node datasets need SpikeNet DeepWalk features first
 
 The SG-JEPA paper (and SpikeNet, whose DBLP/Tmall/Patent release it uses)
@@ -181,8 +307,11 @@ feeds every model 80-dimensional per-snapshot DeepWalk node features
 (`<dataset>.npy`, shape `[T, N, 80]`). Without them the converters write a 4-D
 structural placeholder and **every** model (SG-JEPA, EvolveGCN, ROLAND, ...)
 collapses to the majority class (DBLP: ~0.05 Macro-F1 / ~0.29 Micro-F1 instead
-of the paper's ~0.74 / ~0.75). `load_npz` now emits a `RuntimeWarning` when an
-archive carries the fallback. Two ways to obtain the features:
+of the paper's ~0.74 / ~0.75). `load_npz` therefore refuses to load such an
+archive, and `scripts/run_node_datasets.sh` (hence the Slurm job) checks every
+requested archive's `feature_source` before starting; set
+`DYGJEPA_ALLOW_STRUCTURAL_FALLBACK=1` to run the fallback protocol on purpose.
+Two ways to obtain the features:
 
 1. **Official files** (fastest, exactly what the paper used): SpikeNet's
    Dropbox folder holds `dblp.npy`; `tmall.npy` and `patent.npy` are on the

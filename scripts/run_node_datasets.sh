@@ -44,11 +44,74 @@ for dataset in "${DATASETS[@]}"; do
     *) canonical="$dataset" ;;
   esac
   if [[ ! -f "data/processed/${canonical}.npz" ]]; then
-    echo "Missing data/processed/${canonical}.npz; see README node-data preparation." >&2
-    exit 1
+    if [[ "${AUTO_PREPARE:-1}" == "1" ]]; then
+      echo "== data/processed/${canonical}.npz missing: preparing it (scripts/prepare_node_dataset.sh)"
+      bash scripts/prepare_node_dataset.sh "$canonical"
+    else
+      echo "Missing data/processed/${canonical}.npz; run bash scripts/prepare_node_dataset.sh ${canonical}." >&2
+      exit 1
+    fi
   fi
   CANONICAL_DATASETS+=("$canonical")
 done
+
+# Refuse to launch on the 4-D structural fallback archives: every model then
+# collapses to the majority class and the numbers are not comparable with the
+# SG-JEPA / SpikeNet protocol.  With AUTO_PREPARE=1 (default) such archives are
+# rebuilt with the DeepWalk features first; DYGJEPA_ALLOW_STRUCTURAL_FALLBACK=1
+# runs the fallback protocol on purpose.
+check_archives() {
+"$PYTHON_BIN" - "${CANONICAL_DATASETS[@]}" <<'GUARD'
+import os
+import sys
+import zipfile
+
+import numpy as np
+
+bad = []
+for name in sys.argv[1:]:
+    path = f"data/processed/{name}.npz"
+    with zipfile.ZipFile(path) as archive:
+        members = archive.namelist()
+        source = (
+            str(np.load(archive.open("feature_source.npy"), allow_pickle=True))
+            if "feature_source.npy" in members
+            else "unknown"
+        )
+        with archive.open("features.npy") as handle:
+            version = np.lib.format.read_magic(handle)
+            read_header = (np.lib.format.read_array_header_1_0 if version == (1, 0)
+                           else np.lib.format.read_array_header_2_0)
+            shape, _, dtype = read_header(handle)
+            first = np.frombuffer(
+                handle.read(int(np.prod(shape[1:])) * dtype.itemsize), dtype=dtype
+            )
+    empty = not bool(np.any(first))
+    print(f"{path}: features {shape}, feature_source={source}"
+          + (", FIRST SNAPSHOT ALL ZERO" if empty else ""), flush=True)
+    if source == "structural-fallback" or empty:
+        bad.append(path)
+if bad and os.environ.get("DYGJEPA_ALLOW_STRUCTURAL_FALLBACK", "0") != "1":
+    print(
+        "structural-fallback archives: " + ", ".join(bad) + "\n"
+        "rebuild them with the DeepWalk features (python scripts/prepare_spikenet_node.py "
+        "--dataset <name>; scripts/prepare_dblp.py for DBLP) or set "
+        "DYGJEPA_ALLOW_STRUCTURAL_FALLBACK=1 to run the fallback protocol on purpose.",
+        file=sys.stderr,
+    )
+    raise SystemExit(1)
+GUARD
+}
+if ! check_archives; then
+  if [[ "${AUTO_PREPARE:-1}" == "1" && "${DYGJEPA_ALLOW_STRUCTURAL_FALLBACK:-0}" != "1" ]]; then
+    for canonical in "${CANONICAL_DATASETS[@]}"; do
+      bash scripts/prepare_node_dataset.sh "$canonical"
+    done
+    check_archives || exit 1
+  else
+    exit 1
+  fi
+fi
 
 COMMAND=(
   "$PYTHON_BIN" -m jepa_compare.compare_node_prediction

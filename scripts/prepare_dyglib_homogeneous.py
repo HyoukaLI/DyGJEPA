@@ -65,14 +65,49 @@ def _read_events(
     )
 
 
+def _tie_aligned_bins(timestamps: np.ndarray, requested_bins: int) -> list[np.ndarray]:
+    """Equal-event bins whose boundaries never split a tied-timestamp group.
+
+    The causal semantics elsewhere treat events sharing a timestamp as
+    simultaneous and therefore unavailable to one another.  A boundary that cut
+    through a tie group would break that: an event at time tau could land in
+    bin t-1, entering the snapshot context of a query at the same tau in bin t,
+    while the strict-time event prefix excluded it.  Snapping each boundary
+    forward to the next timestamp change keeps both channels under one rule, at
+    the cost of bins that are only approximately equal in event count.
+    """
+    if requested_bins > len(timestamps):
+        raise ValueError("event_bins cannot exceed the number of interactions")
+    count = len(timestamps)
+    provisional = np.array_split(np.arange(count), requested_bins)
+    boundaries = [0]
+    for chunk in provisional[:-1]:
+        cut = int(chunk[-1]) + 1
+        while 0 < cut < count and timestamps[cut] == timestamps[cut - 1]:
+            cut += 1
+        if cut > boundaries[-1] and cut < count:
+            boundaries.append(cut)
+    boundaries.append(count)
+    bins = [
+        np.arange(boundaries[i], boundaries[i + 1])
+        for i in range(len(boundaries) - 1)
+    ]
+    if len(bins) < requested_bins:
+        raise ValueError(
+            f"tied timestamps collapse {requested_bins} bins into {len(bins)}; "
+            "lower --event-bins or use a dataset with finer timestamps"
+        )
+    return bins
+
+
 def _event_bins(timestamps: np.ndarray, requested_bins: int) -> list[np.ndarray]:
     if requested_bins > len(timestamps):
         raise ValueError("event_bins cannot exceed the number of interactions")
     # Match the bipartite converter: equal-event bins make the downstream
-    # window split identical across datasets. Exact timestamps remain attached
-    # to every event for continuous-time models, including stable ordering of
-    # events that share a timestamp.
-    return list(np.array_split(np.arange(len(timestamps)), requested_bins))
+    # window split identical across datasets. Boundaries are snapped so a tied
+    # timestamp group is never split, which keeps the snapshot context and the
+    # strict-time event prefix under the same causal rule.
+    return _tie_aligned_bins(timestamps, requested_bins)
 
 
 def convert(
@@ -131,7 +166,9 @@ def convert(
     feature_dim = identity_dim + event_feature_dim + 4
     bins = _event_bins(timestamps, event_bins)
     features = np.zeros((len(bins), num_nodes, feature_dim), dtype=np.float32)
-    active = np.ones((len(bins), num_nodes), dtype=bool)
+    # Definition 1 defines V_t as the nodes active in bin t; populate it from the
+    # events actually observed rather than marking every node active everywhere.
+    active = np.zeros((len(bins), num_nodes), dtype=bool)
     cumulative_out = np.zeros(num_nodes, dtype=np.float32)
     cumulative_in = np.zeros(num_nodes, dtype=np.float32)
     last_out = np.full(num_nodes, timestamps[0], dtype=np.float64)
@@ -142,13 +179,15 @@ def convert(
     for bin_index, event_indices in enumerate(bins):
         source = sources[event_indices]
         destination = destinations[event_indices]
+        active[bin_index, source] = True
+        active[bin_index, destination] = True
         queries = np.stack([source, destination])
         messages = np.concatenate([queries, queries[[1, 0]]], axis=1)
         messages = np.unique(messages, axis=1).astype(np.int64, copy=False)
         archive[f"edges_{bin_index}"] = messages
         archive[f"queries_{bin_index}"] = queries.astype(np.int64, copy=False)
         archive[f"query_timestamps_{bin_index}"] = timestamps[event_indices].astype(
-            np.float32, copy=False
+            np.float64, copy=False
         )
         archive[f"query_features_{bin_index}"] = raw_features[event_indices]
         archive[f"query_labels_{bin_index}"] = labels[event_indices]

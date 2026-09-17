@@ -12,9 +12,11 @@ from torch import nn
 import yaml
 
 from .compare_link_prediction import _build_graph
+from .view_alignment import require_aligned_views
 from .node_evaluation import (
     final_probe,
     final_probe_ensemble,
+    validation_probe_ensemble,
     macro_micro_f1,
     stratified_split,
     validation_probe,
@@ -181,14 +183,41 @@ def _select_node_embeddings(
     seed: int,
     probe_hidden_dim,
     candidates: tuple[str, ...],
+    ensemble: bool = False,
 ) -> tuple[torch.Tensor, dict[str, float], str]:
-    """Select a checkpoint view using validation labels only."""
+    """Select a checkpoint using validation labels only.
+
+    With ``ensemble=True`` the criterion is the validation macro-F1 of the
+    logit ensemble over ``candidates`` -- the same functional that is reported
+    at test time by :func:`_final_rcps_multiscale_probe`.  Scoring each view
+    separately and keeping the better one, as the ``ensemble=False`` path does,
+    selects the epoch that is best for a quantity we do not report; that path
+    remains correct for the baselines, which report a single view.
+    """
+    if ensemble and len(candidates) < 2:
+        raise ValueError("ensemble checkpoint selection needs at least two views")
     with torch.no_grad():
         views, node_ids = _infer_views(model, graph)
     _require_global_node_order(node_ids, graph.num_nodes)
     missing = [name for name in candidates if name not in views]
     if missing:
         raise KeyError(f"model is missing checkpoint views: {missing}")
+
+    if ensemble:
+        selected_views = {name: views[name] for name in candidates}
+        validation = validation_probe_ensemble(
+            selected_views,
+            graph.labels,
+            probe_split,
+            probe_epochs,
+            seed,
+            probe_hidden_dim,
+        )
+        label = f"logit_ensemble[{','.join(candidates)}]"
+        selected = dict(validation)
+        selected["selected_view"] = label
+        # The tensor is unused on this path; the caller only reads the metrics.
+        return views[candidates[0]].detach(), selected, label
 
     best_name = candidates[0]
     best_embeddings = views[best_name]
@@ -235,7 +264,7 @@ def _final_rcps_multiscale_probe(
     _require_global_node_order(node_ids, graph.num_nodes)
     missing = [name for name in names if name not in views]
     if missing:
-        raise KeyError(f"RCPS multi-scale probe is missing views: {missing}")
+        raise KeyError(f"DyGJEPA multi-scale probe is missing views: {missing}")
 
     result = final_probe_ensemble(
         {name: views[name] for name in names},
@@ -287,10 +316,14 @@ def _train_node_model_inner(
     )
     is_rcps = isinstance(model, RCPSJEPA)
     checkpoint_views = (
-        tuple(training.get("rcps_checkpoint_views", ("fused",)))
+        tuple(training.get("rcps_checkpoint_views", ("prediction", "encoder")))
         if is_rcps
         else ("encoder", "prediction")
     )
+    if is_rcps:
+        require_aligned_views(
+            checkpoint_views, tuple(training.get("rcps_multiscale_views", ()))
+        )
     best_score = float("-inf")
     best_epoch = 0
     best_state = None
@@ -337,6 +370,7 @@ def _train_node_model_inner(
             seed,
             probe_hidden_dim,
             checkpoint_views,
+            ensemble=is_rcps,
         )
         print(
             json.dumps(
@@ -966,7 +1000,7 @@ def run(config: dict) -> dict[str, dict[str, float]]:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Compare SG-JEPA/RCPS-JEPA with dynamic-GNN node baselines"
+        description="Compare SG-JEPA/DyGJEPA with dynamic-GNN node baselines"
     )
     parser.add_argument(
         "--config",
