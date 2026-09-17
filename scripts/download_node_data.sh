@@ -79,7 +79,9 @@ for dataset in "${DATASETS[@]}"; do
     fi
   fi
   if [[ -s "$npy" ]]; then
-    python3 - "$npy" <<'PY'
+    # Shape report only; uses the project interpreter when the caller exports
+    # PYTHON_BIN (prepare_node_dataset.sh does) and never fails the download.
+    "${PYTHON_BIN:-python3}" - "$npy" <<'PY' || echo "  ($npy downloaded; shape check skipped: numpy not importable by ${PYTHON_BIN:-python3})"
 import sys, numpy as np
 a = np.load(sys.argv[1], mmap_mode="r"); print(f"  {sys.argv[1]}: shape={a.shape} dtype={a.dtype}")
 PY
