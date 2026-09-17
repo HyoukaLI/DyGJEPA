@@ -221,7 +221,14 @@ datasets:
     models: *homogeneous_models
     overrides:
       dyrep: {dropout: 0.1, sample_neighbor_strategy: recent}
-      tgat: {dropout: 0.1, uniform_neighbors: true}
+      # UN Trade's only event feature is the raw trade volume (max ~5.25e7;
+      # every other dataset stays below 3e2).  The TGAT adapter has no
+      # per-layer normalization, so the unscaled values overflow fp32 and its
+      # loss is non-finite from epoch 1 (the driver then records the failure
+      # and the tgat entry is missing).  edge_feature_transform applies
+      # sign(x)*log1p(|x|) to TGAT's copy of the features on this dataset
+      # only; no other model or dataset is affected.
+      tgat: {dropout: 0.1, uniform_neighbors: true, edge_feature_transform: log1p}
       tgn: {dropout: 0.2, sample_neighbor_strategy: recent}
       cawn: {num_neighbors: 64, dropout: 0.1}
       tcl: {dropout: 0.0, sample_neighbor_strategy: uniform}

@@ -29,7 +29,18 @@ class TGATLinkBaseline(nn.Module, SharedLinkProtocol):
     the merge-layer affinity decoder.  Only the temporal split, evaluation
     candidates, metrics and validation checkpoint rule are shared with the
     other models.
+
+    ``edge_feature_transform`` is a per-dataset numerical guard for this
+    adapter only.  ``"none"`` (default) feeds the stored event features
+    unchanged.  ``"log1p"`` applies ``sign(x) * log1p(|x|)`` to TGAT's copy of
+    the event features: UN Trade ships raw trade volumes (up to ~5e7 while
+    every other dataset stays below 3e2) and TGAT's two-layer attention
+    recursion carries no normalization, so the unscaled values overflow fp32
+    and the loss goes non-finite in the first epoch.  The transform touches
+    nothing outside this model.
     """
+
+    EDGE_FEATURE_TRANSFORMS = frozenset({"none", "log1p"})
 
     def __init__(
         self,
@@ -51,11 +62,17 @@ class TGATLinkBaseline(nn.Module, SharedLinkProtocol):
         negative_destination_candidates: Tensor | None = None,
         allow_negative_collisions: bool = False,
         eval_positive_batch_size: int | None = None,
+        edge_feature_transform: str = "none",
     ) -> None:
         super().__init__()
         del feature_dim
         if undirected:
             raise ValueError("TGAT event evaluation requires directed links")
+        if edge_feature_transform not in self.EDGE_FEATURE_TRANSFORMS:
+            raise ValueError(
+                "edge_feature_transform must be one of "
+                f"{sorted(self.EDGE_FEATURE_TRANSFORMS)}, got {edge_feature_transform!r}"
+            )
         if bipartite_source_count is not None and not 0 < bipartite_source_count < num_nodes:
             raise ValueError("bipartite_source_count must split users and items")
         if num_layers < 1 or num_neighbors < 1 or train_batch_size < 1:
@@ -80,6 +97,7 @@ class TGATLinkBaseline(nn.Module, SharedLinkProtocol):
         self.negative_destination_candidates = negative_destination_candidates
         self.allow_negative_collisions = allow_negative_collisions
         self.eval_positive_batch_size = eval_positive_batch_size
+        self.edge_feature_transform = edge_feature_transform
 
         # The official Wikipedia preprocessing supplies 172-D edge features
         # and zero node features of the same width.  The final row is padding.
@@ -144,7 +162,14 @@ class TGATLinkBaseline(nn.Module, SharedLinkProtocol):
         padding = torch.zeros(
             1, self.dimension, dtype=full.features.dtype, device=full.features.device
         )
-        self.edge_features = torch.cat([full.features, padding], dim=0)
+        self.edge_features = torch.cat(
+            [self._transform_edge_features(full.features), padding], dim=0
+        )
+
+    def _transform_edge_features(self, features: Tensor) -> Tensor:
+        if self.edge_feature_transform == "none":
+            return features
+        return torch.sign(features) * torch.log1p(features.abs())
 
     def _temporal_embedding(
         self,

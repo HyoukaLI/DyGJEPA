@@ -88,6 +88,16 @@ DyGJEPA may use multiple random destinations per positive during training as
 a model-specific hyperparameter; validation and test always retain the shared
 one-positive/one-negative protocol.
 
+One dataset-specific exception: on UN Trade the only event feature is the raw
+trade volume (up to ~5.25e7, while every other dataset stays below 3e2). The
+TGAT adapter has no per-layer normalization, so the unscaled values overflow
+fp32 and its loss is non-finite from the first epoch (the run then has no
+`tgat` entry). The `untrade` block therefore sets
+`tgat: {edge_feature_transform: log1p}`, which applies `sign(x) * log1p(|x|)`
+to TGAT's own copy of the event features. Nothing else changes: the default is
+`none`, every other model reads the stored features unchanged, and TGAT on
+every other dataset is bit-identical to the previous runs.
+
 ### Historical negative sampling (separate run)
 
 DyGLib's historical negatives (Poursafaei et al., 2022;
