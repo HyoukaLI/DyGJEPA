@@ -129,8 +129,34 @@ fi
 if [[ -n "${EPOCHS:-}" ]]; then
   COMMAND+=(--epochs "$EPOCHS")
 fi
-if [[ -n "${SEEDS:-}" ]]; then
-  read -r -a SELECTED_SEEDS <<< "$SEEDS"
+# Per-job knobs, same spelling as the link launcher:
+#   MODELS="cawn"                -> --models (sg_jepa / rcps_jepa / one or more baselines)
+#   SEED=42 or SEEDS="42 44"     -> --seeds
+#   TRAIN_RATIO=0.6              -> --train-ratio (probe split; result stem gets _ratio0.6)
+#   OUTPUT_DIR=results/tmall     -> --output      (directory of the result files)
+#   OUTPUT_NAME=cawn             -> --output-name (file stem; each seed writes
+#                                   <OUTPUT_DIR>/<OUTPUT_NAME>[_ratio<r>]_seed<s>.json)
+#   e.g. MODELS=cawn SEED=42 TRAIN_RATIO=0.4 OUTPUT_DIR=results/tmall OUTPUT_NAME=cawn \
+#          bash scripts/run_node_datasets.sh tmall
+if [[ -n "${SEEDS:-}" || -n "${SEED:-}" ]]; then
+  read -r -a SELECTED_SEEDS <<< "${SEEDS:-$SEED}"
   COMMAND+=(--seeds "${SELECTED_SEEDS[@]}")
 fi
+if [[ -n "${MODELS:-}" ]]; then
+  read -r -a SELECTED_MODELS <<< "$MODELS"
+  COMMAND+=(--models "${SELECTED_MODELS[@]}")
+fi
+if [[ -n "${TRAIN_RATIO:-}" ]]; then
+  COMMAND+=(--train-ratio "$TRAIN_RATIO")
+fi
+if [[ -n "${OUTPUT_DIR:-}" ]]; then
+  COMMAND+=(--output "$OUTPUT_DIR")
+fi
+if [[ -n "${OUTPUT_NAME:-}" ]]; then
+  COMMAND+=(--output-name "$OUTPUT_NAME")
+fi
+
+printf '[%s] command:' "$(date +%Y-%m-%dT%H:%M:%S)"
+printf ' %q' "${COMMAND[@]}"
+printf '\n'
 "${COMMAND[@]}"

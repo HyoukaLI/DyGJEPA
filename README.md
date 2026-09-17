@@ -390,6 +390,26 @@ The shared node configuration is `configs/node_comparison_all.yaml`; it
 inherits the established DBLP settings and changes only dataset paths and the
 node batch size (1024 for Tmall, 2048 for Patent).
 
+Per-job runs (one model, one seed, one labelled-training ratio) use the same
+knobs as the link launcher; each job writes its own file, so any number of
+them can run in parallel:
+
+```bash
+MODELS=cawn SEED=42 TRAIN_RATIO=0.6 OUTPUT_DIR=results/tmall OUTPUT_NAME=cawn \
+  bash scripts/run_node_datasets.sh tmall
+# -> results/tmall/cawn_ratio0.6_seed42.json  (keys: cawn only)
+MODELS="sg_jepa rcps_jepa" SEED=42 TRAIN_RATIO=0.4 OUTPUT_DIR=results/tmall OUTPUT_NAME=jepa \
+  bash scripts/run_node_datasets.sh tmall
+# -> results/tmall/jepa_ratio0.4_seed42.json  (keys: sg_jepa, rcps_jepa)
+```
+
+`MODELS` picks any subset of `sg_jepa rcps_jepa evolvegcn_h roland tgn tgat
+cawn tcl graphmixer dygformer cldg maskdgnn dvgmae` (default: both JEPA models
+plus `node_baselines.enabled`); `TRAIN_RATIO` overrides `probe.train_ratio`
+(default 0.4) and appends `_ratio<r>` to the file stem; `SEED`/`SEEDS`,
+`EPOCHS` and `BASELINES` work as before. The same options exist on the driver
+as `--models`, `--train-ratio`, `--output`, `--output-name`.
+
 Multi-seed node results are written to:
 
 ```text

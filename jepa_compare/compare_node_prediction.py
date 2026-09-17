@@ -106,6 +106,68 @@ def _apply_cli_overrides(config: dict, epochs: int | None, baselines) -> None:
         config.setdefault("node_baselines", {})["enabled"] = baselines
 
 
+_NODE_MODELS = (
+    "sg_jepa",
+    "rcps_jepa",
+    "evolvegcn_h",
+    "roland",
+    "tgn",
+    "tgat",
+    "cawn",
+    "tcl",
+    "graphmixer",
+    "dygformer",
+    "cldg",
+    "maskdgnn",
+    "dvgmae",
+)
+
+
+def _apply_run_overrides(
+    config: dict,
+    *,
+    models: list[str] | None,
+    train_ratio: float | None,
+    output_dir: Path | None,
+    output_name: str | None,
+) -> None:
+    """Launcher-level overrides: model subset, probe train ratio, output naming.
+
+    ``models`` selects which of sg_jepa / rcps_jepa run and replaces
+    ``node_baselines.enabled`` with the requested baselines (in the given
+    order).  ``train_ratio`` overrides ``probe.train_ratio`` and appends
+    ``_ratio<r>`` to the result stem so different ratios never share a file.
+    ``output_dir`` / ``output_name`` replace the directory / stem of
+    ``output_path``.  Without any of them the configuration is untouched.
+    """
+    if models is not None:
+        unknown = sorted(set(models) - set(_NODE_MODELS))
+        if unknown:
+            raise ValueError(f"unknown node models: {unknown}")
+        config["models"] = list(dict.fromkeys(models))
+        config.setdefault("node_baselines", {})["enabled"] = [
+            name for name in config["models"] if name not in ("sg_jepa", "rcps_jepa")
+        ]
+    path = Path(config["output_path"])
+    stem = output_name if output_name is not None else path.stem
+    if train_ratio is not None:
+        config.setdefault("probe", {})["train_ratio"] = float(train_ratio)
+        stem = f"{stem}_ratio{train_ratio:g}"
+    directory = Path(output_dir) if output_dir is not None else path.parent
+    config["output_path"] = str(directory / f"{stem}{path.suffix or '.json'}")
+
+
+def _explicit_output(args) -> bool:
+    """With --output / --output-name / --train-ratio every seed gets its own
+    ``<stem>_seed<s>.json`` even for a single seed, so per-seed launcher jobs
+    sharing one name never overwrite each other."""
+    return (
+        args.output is not None
+        or args.output_name is not None
+        or args.train_ratio is not None
+    )
+
+
 def _seed_values(config: dict) -> list[int]:
     raw = config.get("seed", 42)
     values = raw if isinstance(raw, list) else [raw]
@@ -804,32 +866,33 @@ def run(config: dict) -> dict[str, dict[str, float]]:
         seed,
     )
 
-    torch.manual_seed(seed)
-    sg_model = SGJEPA(
-        feature_dim=graph.feature_dim,
-        **{**common, **dict(config.get("sg_jepa", {}))},
-    ).to(device)
-    sg_result = _train_node_model(
-        "sg_jepa", sg_model, graph, windows, probe_split, config["training"], seed
+    # ``models`` (CLI --models / launcher MODELS) narrows the run to a subset of
+    # {sg_jepa, rcps_jepa, <baselines>}; absent, both JEPA models and every
+    # enabled baseline run exactly as before.
+    requested = config.get("models")
+    jepa_models = (
+        ["sg_jepa", "rcps_jepa"]
+        if requested is None
+        else [name for name in ("sg_jepa", "rcps_jepa") if name in requested]
     )
-
-    torch.manual_seed(seed)
-    rcps_model = RCPSJEPA(
-        feature_dim=graph.feature_dim,
-        **{**common, **dict(config.get("rcps_jepa", {}))},
-    ).to(device)
-    rcps_result = _train_node_model(
-        "rcps_jepa", rcps_model, graph, windows, probe_split, config["training"], seed
-    )
-
-    result = {"sg_jepa": sg_result, "rcps_jepa": rcps_result}
-    _save_partial_results(config, result)
-    # The baselines are intentionally run one at a time.  Releasing the JEPA
-    # modules here avoids retaining several full temporal computation graphs on
-    # the same GPU (important for the 28k-node DBLP run).
-    del sg_model, rcps_model
-    if device.type == "cuda":
-        torch.cuda.empty_cache()
+    result: dict[str, dict[str, float]] = {}
+    for name in jepa_models:
+        torch.manual_seed(seed)
+        model_cls = SGJEPA if name == "sg_jepa" else RCPSJEPA
+        jepa_model = model_cls(
+            feature_dim=graph.feature_dim,
+            **{**common, **dict(config.get(name, {}))},
+        ).to(device)
+        result[name] = _train_node_model(
+            name, jepa_model, graph, windows, probe_split, config["training"], seed
+        )
+        _save_partial_results(config, result)
+        # The models are intentionally run one at a time.  Releasing the JEPA
+        # modules here avoids retaining several full temporal computation graphs
+        # on the same GPU (important for the 28k-node DBLP run).
+        del jepa_model
+        if device.type == "cuda":
+            torch.cuda.empty_cache()
 
     baseline_cfg = dict(config.get("node_baselines", {}))
     enabled = tuple(name.lower() for name in baseline_cfg.get("enabled", ()))
@@ -1040,12 +1103,44 @@ def main() -> None:
         default=None,
         help="override node_baselines.enabled (pass no values to disable all baselines)",
     )
+    parser.add_argument(
+        "--models",
+        nargs="+",
+        choices=sorted(_NODE_MODELS),
+        default=None,
+        help="run only these models (sg_jepa, rcps_jepa and/or baselines); "
+        "default: both JEPA models plus node_baselines.enabled",
+    )
+    parser.add_argument(
+        "--train-ratio",
+        type=float,
+        default=None,
+        help="override probe.train_ratio (labelled-node training fraction, e.g. 0.4/0.6/0.8)",
+    )
+    parser.add_argument(
+        "--output",
+        type=Path,
+        default=None,
+        help="directory for the result files (replaces the directory of output_path)",
+    )
+    parser.add_argument(
+        "--output-name",
+        default=None,
+        help="file stem for the result files (default: the configured output_path stem); "
+        "--train-ratio appends _ratio<r>, every seed writes <stem>[_ratio<r>]_seed<s>.json",
+    )
     wandb_logging.add_cli_arguments(parser)
     args = parser.parse_args()
     config = _load_config(args.config)
     wandb_logging.apply_cli_overrides(config, args)
     if args.seeds is not None:
         config["seed"] = args.seeds[0] if len(args.seeds) == 1 else args.seeds
+    if args.train_ratio is not None and not 0.0 < args.train_ratio < 1.0:
+        raise ValueError("--train-ratio must be in (0, 1)")
+    if args.output_name is not None and (
+        not args.output_name or "/" in args.output_name
+    ):
+        raise ValueError("--output-name must be a bare file stem")
     if args.datasets is not None:
         if not config.get("datasets"):
             raise ValueError("--datasets requires a multi-dataset node config")
@@ -1077,8 +1172,15 @@ def main() -> None:
     dataset_results: dict[str, dict] = {}
     for dataset_name, dataset_config in _dataset_configs(config):
         _apply_cli_overrides(dataset_config, args.epochs, args.baselines)
+        _apply_run_overrides(
+            dataset_config,
+            models=args.models,
+            train_ratio=args.train_ratio,
+            output_dir=args.output,
+            output_name=args.output_name,
+        )
         base_output = Path(dataset_config["output_path"])
-        if len(seeds) == 1:
+        if len(seeds) == 1 and not _explicit_output(args):
             dataset_config["seed"] = seeds[0]
             print(
                 json.dumps(
@@ -1115,12 +1217,18 @@ def main() -> None:
             "runs": runs,
             "aggregate": _aggregate_seed_runs(runs),
         }
-        base_output.parent.mkdir(parents=True, exist_ok=True)
-        base_output.write_text(json.dumps(dataset_summary, indent=2))
+        if len(seeds) > 1:
+            base_output.parent.mkdir(parents=True, exist_ok=True)
+            base_output.write_text(json.dumps(dataset_summary, indent=2))
         dataset_results[dataset_name] = dataset_summary
 
     if config.get("datasets") and config.get("summary_output_path"):
         summary_path = Path(config["summary_output_path"])
+        if _explicit_output(args):
+            # Per-job runs must not race on the shared results/node_comparison_all.json:
+            # the summary goes next to that job's own result files.
+            last_output = Path(dataset_config["output_path"])
+            summary_path = last_output.with_name(f"{last_output.stem}_summary.json")
         summary_path.parent.mkdir(parents=True, exist_ok=True)
         summary_path.write_text(json.dumps(dataset_results, indent=2))
 
