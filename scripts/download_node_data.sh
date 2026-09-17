@@ -24,11 +24,16 @@ RELEASE="${RELEASE:-node-data-v1}"
 BASE="https://github.com/$REPO/releases/download/$RELEASE"
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
-declare -A RAW=(
-  [dblp]="dblp.txt node2label.txt"
-  [tmall]="tmall.txt node2label.txt"
-  [patent]="patent_edges.json patent_nodes.json"
-)
+# Raw SpikeNet files per dataset (a function rather than an associative array so
+# the script also runs under macOS's bash 3.2).
+raw_files() {  # <dataset>
+  case "$1" in
+    dblp)   echo "dblp.txt node2label.txt" ;;
+    tmall)  echo "tmall.txt node2label.txt" ;;
+    patent) echo "patent_edges.json patent_nodes.json" ;;
+    *) return 1 ;;
+  esac
+}
 # Release assets are flat, so per-dataset files are prefixed on upload:
 #   dblp_node2label.txt, tmall_node2label.txt, tmall.txt, patent_edges.json, ...
 asset_name() {  # <dataset> <local file>
@@ -47,10 +52,10 @@ fetch() {  # <url> <dest>
 
 DATASETS=("$@"); [[ ${#DATASETS[@]} -eq 0 ]] && DATASETS=(dblp tmall patent)
 for dataset in "${DATASETS[@]}"; do
-  [[ -n "${RAW[$dataset]:-}" ]] || { echo "unknown dataset $dataset"; exit 1; }
+  files="$(raw_files "$dataset")" || { echo "unknown dataset $dataset"; exit 1; }
   dir="data/raw/$dataset"; mkdir -p "$dir"
   echo "== $dataset -> $dir"
-  for file in ${RAW[$dataset]}; do
+  for file in $files; do
     fetch "$BASE/$(asset_name "$dataset" "$file")" "$dir/$file"
   done
   # Pre-computed features: whole file, or split parts.

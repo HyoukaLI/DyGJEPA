@@ -14,16 +14,19 @@ command -v gh >/dev/null || { echo "gh CLI not found (https://cli.github.com)"; 
 gh release view "$RELEASE" -R "$REPO" >/dev/null 2>&1 \
   || gh release create "$RELEASE" -R "$REPO" -t "$RELEASE" -n "Node-classification inputs (SpikeNet raw data + DeepWalk features)"
 
-declare -A RAW=(
-  [dblp]="dblp.txt node2label.txt"
-  [tmall]="tmall.txt node2label.txt"
-  [patent]="patent_edges.json patent_nodes.json"
-)
+raw_files() {  # <dataset>; a function so the script also runs under macOS's bash 3.2
+  case "$1" in
+    dblp)   echo "dblp.txt node2label.txt" ;;
+    tmall)  echo "tmall.txt node2label.txt" ;;
+    patent) echo "patent_edges.json patent_nodes.json" ;;
+    *) echo "unknown dataset $1" >&2; return 1 ;;
+  esac
+}
 DATASETS=("$@"); [[ ${#DATASETS[@]} -eq 0 ]] && DATASETS=(dblp tmall patent)
 tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
 for dataset in "${DATASETS[@]}"; do
   dir="data/raw/$dataset"
-  for file in ${RAW[$dataset]}; do
+  for file in $(raw_files "$dataset"); do
     asset="$file"; [[ "$file" == node2label.txt ]] && asset="${dataset}_node2label.txt"
     ln -sf "$(pwd)/$dir/$file" "$tmp/$asset"
     echo "== upload $asset"; gh release upload "$RELEASE" -R "$REPO" "$tmp/$asset" --clobber
