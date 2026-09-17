@@ -199,6 +199,15 @@ def _load_features(
         )
     for t in range(steps):
         current = np.asarray(source[t], dtype=np.float32)
+        if not current.any():
+            # generate_spikenet_deepwalk.py pre-allocates the .npy and fills it
+            # snapshot by snapshot; an all-zero snapshot means the generation
+            # never finished (or the file was never filled at all).
+            raise ValueError(
+                f"{path}: snapshot {t} is entirely zero - the DeepWalk features are "
+                "incomplete; finish generate_spikenet_deepwalk.py or download the "
+                "released <dataset>.npy before building the archive"
+            )
         features[t] = (current - current.mean()) / (current.std() + 1e-6)
         if not np.isfinite(features[t]).all():
             raise ValueError(f"{path}: snapshot {t} contains NaN/inf after standardization")

@@ -44,7 +44,10 @@ def test_convert_wikipedia_preserves_bipartite_duplicate_events(tmp_path: Path) 
     assert graph.snapshots[0].query_features is not None
     assert graph.snapshots[1].query_labels is not None
     assert graph.snapshots[1].query_labels.tolist() == [1]
-    assert graph.snapshots[0].active.all()
+    # V_t holds only the nodes that interact in bin t (Definition 1): bin 0
+    # carries the two u0-p0 events, bin 1 the single u1-p1 event.
+    assert graph.snapshots[0].active.tolist() == [True, False, True, False]
+    assert graph.snapshots[1].active.tolist() == [False, True, False, True]
 
 
 def test_convert_homogeneous_dyglib_events_without_bipartite_split(
