@@ -1,0 +1,42 @@
+# DyGLib inductive (new-node) setting with random negative sampling for the
+# link comparison, run separately from the transductive random / historical /
+# inductive-negative runs.
+#
+# This file is an overlay: every dataset entry, model setting and optimizer
+# recipe is inherited from link_comparison_all.yaml, so tuning done there is
+# picked up here automatically.  Only the setting and the result location
+# change.  Launch with
+#
+#   bash scripts/run_link_datasets_inductive_setting.sh [datasets...]
+#   sbatch run_link_datasets_inductive_setting.sbatch
+#
+# Protocol, as in DyGLib get_link_prediction_data / train_link_prediction.py
+# (the "inductive" tables of DyGFormer / DyG-Mamba style papers, random
+# negatives): 10% of all nodes are drawn (seed 2020) among those that interact
+# after the training period; every training event touching one of them is
+# removed (message edges, features and activity of those nodes too), models
+# train on the reduced snapshots and their checkpoints are still selected on
+# the ordinary (transductive) validation set with random negatives.  The final
+# validation/test pass of the selected checkpoint then scores only the events
+# with at least one endpoint that never appears in the reduced training data,
+# one random destination per event drawn from those events' own destinations
+# (validation seed 1, test seed 3), 200 positives per batch.  Context
+# encoders, neighbour samplers and EdgeBank's memory see the full graph at
+# evaluation time (DyGLib full_neighbor_sampler); memory models replay the
+# reduced training stream.  Not combinable with historical/inductive negatives.
+base_config: link_comparison_all.yaml
+
+link:
+  setting: inductive
+  new_node_ratio: 0.1
+  new_node_seed: 2020
+
+# Separate result tree; the driver additionally suffixes every file with
+# _inductive_setting, e.g.
+# results/inductive_setting/link_comparison_canparl_inductive_setting.json
+# and results/inductive_setting/link_comparison_all_inductive_setting.json.
+output_dir: results/inductive_setting
+summary_output_path: results/inductive_setting/link_comparison_all.json
+
+wandb:
+  tags: [inductive_setting]

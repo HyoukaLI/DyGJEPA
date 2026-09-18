@@ -15,6 +15,7 @@ import yaml
 from .data import load_npz, make_synthetic
 from .dyglib_baselines import DyGLibLinkBaseline, EdgeBankLinkBaseline
 from .efficiency import EfficiencyMeter
+from .inductive_setting import InductiveSetting, build_inductive_setting, normalize_setting
 from .jodie_baseline import JODIELinkBaseline
 from .link_prediction import (
     TemporalWindowSplit,
@@ -108,6 +109,19 @@ def _with_strategy_suffix(path: str | Path, strategy: str) -> str:
     if strategy == "random":
         return str(path)
     return str(path.with_name(f"{path.stem}_{strategy}{path.suffix}"))
+
+
+def _link_setting(config: dict) -> str:
+    """Read ``link.setting`` (default: DyGLib transductive)."""
+    return normalize_setting(dict(config.get("link", {})).get("setting", "transductive"))
+
+
+def _with_setting_suffix(path: str | Path, setting: str) -> str:
+    """Inductive-setting result files carry ``_inductive_setting``."""
+    path = Path(path)
+    if setting == "transductive":
+        return str(path)
+    return str(path.with_name(f"{path.stem}_inductive_setting{path.suffix}"))
 
 
 def _build_negative_edge_table(
@@ -222,6 +236,26 @@ def _efficiency_record(
     )
 
 
+def _attach_inductive_evaluation(
+    model: nn.Module, inductive: InductiveSetting, split_name: str
+) -> None:
+    """Point every evaluator at the new-node destination pool of ``split_name``.
+
+    The shared-protocol evaluators (DyGJEPA, snapshot SSL probes, JODIE, TGAT,
+    EdgeBank) draw random destinations from ``negative_destination_candidates``
+    and read the positives from the (restricted) target snapshots they are
+    given; the DyGLib adapter looks its streams up by time and therefore gets
+    the new-node ids and the pool explicitly.
+    """
+    pool = inductive.validation_pool if split_name == "validation" else inductive.test_pool
+    model.negative_destination_candidates = pool  # type: ignore[attr-defined]
+    if isinstance(model, DyGLibLinkBaseline):
+        model.inductive_evaluation = (
+            inductive.new_node_ids,
+            pool.detach().cpu().numpy().astype(np.int64),
+        )
+
+
 def _train_one(
     name: str,
     model: nn.Module,
@@ -230,6 +264,7 @@ def _train_one(
     seed: int,
     negative_edge_table: NegativeEdgeTable | None = None,
     meter: EfficiencyMeter | None = None,
+    inductive: InductiveSetting | None = None,
 ) -> tuple[dict[str, float], dict[str, float]]:
     """Train one model, mirroring its epochs into a wandb run when enabled.
 
@@ -242,7 +277,7 @@ def _train_one(
     """
     with wandb_logging.run_for_model(name, seed, {"training": training}) as wb_run:
         return _train_one_inner(
-            name, model, split, training, seed, wb_run, negative_edge_table, meter
+            name, model, split, training, seed, wb_run, negative_edge_table, meter, inductive
         )
 
 
@@ -255,6 +290,7 @@ def _train_one_inner(
     wb_run,
     negative_edge_table: NegativeEdgeTable | None = None,
     meter: EfficiencyMeter | None = None,
+    inductive: InductiveSetting | None = None,
 ) -> tuple[dict[str, float], dict[str, float]]:
     native_jodie = isinstance(model, JODIELinkBaseline)
     native_event_model = isinstance(
@@ -420,16 +456,35 @@ def _train_one_inner(
     model.eval()
     if negative_edge_table is not None:
         model.negative_edge_table = negative_edge_table
-    with _phase(meter, "final_validation"):
-        validation = evaluate(
-            split.validation, split.train, validation_query_seed
-        )
-    with _phase(meter, "test"):
-        test = evaluate(
-            split.test,
-            [*split.train, *split.validation],
-            test_query_seed,
-        )
+    if inductive is None:
+        with _phase(meter, "final_validation"):
+            validation = evaluate(
+                split.validation, split.train, validation_query_seed
+            )
+        with _phase(meter, "test"):
+            test = evaluate(
+                split.test,
+                [*split.train, *split.validation],
+                test_query_seed,
+            )
+    else:
+        # DyGLib inductive setting: the checkpoint was selected on the
+        # transductive validation set above; the reported numbers score only
+        # the new-node events against their own destination pool.
+        with _phase(meter, "final_validation"):
+            _attach_inductive_evaluation(model, inductive, "validation")
+            validation = evaluate(
+                inductive.validation_windows,
+                inductive.full_train_windows,
+                inductive.validation_query_seed,
+            )
+        with _phase(meter, "test"):
+            _attach_inductive_evaluation(model, inductive, "test")
+            test = evaluate(
+                inductive.test_windows,
+                [*inductive.full_train_windows, *split.validation],
+                inductive.test_query_seed,
+            )
     test["best_epoch"] = float(best_epoch)
     wb_run.summary(
         {
@@ -449,11 +504,12 @@ def _train_snapshot_ssl_one(
     seed: int,
     negative_edge_table: NegativeEdgeTable | None = None,
     meter: EfficiencyMeter | None = None,
+    inductive: InductiveSetting | None = None,
 ) -> tuple[dict[str, float], dict[str, float | str]]:
     """Run native SSL pretraining followed by a shared frozen link probe."""
     with wandb_logging.run_for_model(name, seed, {"training": training}) as wb_run:
         return _train_snapshot_ssl_one_inner(
-            name, model, split, training, seed, wb_run, negative_edge_table, meter
+            name, model, split, training, seed, wb_run, negative_edge_table, meter, inductive
         )
 
 
@@ -466,6 +522,7 @@ def _train_snapshot_ssl_one_inner(
     wb_run,
     negative_edge_table: NegativeEdgeTable | None = None,
     meter: EfficiencyMeter | None = None,
+    inductive: InductiveSetting | None = None,
 ) -> tuple[dict[str, float], dict[str, float | str]]:
     """Pretrain, then fit the frozen probe, logging both stages separately."""
     pretrain_optimizer = torch.optim.Adam(
@@ -556,15 +613,26 @@ def _train_snapshot_ssl_one_inner(
     model.eval()
     if negative_edge_table is not None:
         model.negative_edge_table = negative_edge_table
+    final_validation_windows, final_test_windows = split.validation, split.test
+    if inductive is not None:
+        final_validation_windows, final_test_windows = (
+            inductive.validation_windows, inductive.test_windows
+        )
+        validation_query_seed = inductive.validation_query_seed
+        test_query_seed = inductive.test_query_seed
     with _phase(meter, "final_validation"):
+        if inductive is not None:
+            _attach_inductive_evaluation(model, inductive, "validation")
         validation = model.evaluate_windows(
-            split.validation,
+            final_validation_windows,
             pair_batch_size=pair_batch_size,
             query_seed=validation_query_seed,
         )
     with _phase(meter, "test"):
+        if inductive is not None:
+            _attach_inductive_evaluation(model, inductive, "test")
         test: dict[str, float | str] = model.evaluate_windows(
-            split.test,
+            final_test_windows,
             pair_batch_size=pair_batch_size,
             query_seed=test_query_seed,
         )
@@ -655,6 +723,31 @@ def run(config: dict) -> dict[str, dict[str, dict[str, float]]]:
     negative_strategy = normalize_negative_strategy(
         link_cfg.pop("negative_strategy", "random")
     )
+    # DyGLib's inductive (new-node) setting is likewise a driver-level switch:
+    # 10% of the nodes are held out of training, checkpoints are still selected
+    # on the transductive validation set, and the final numbers score only the
+    # events that touch a node unseen in training (see inductive_setting.py).
+    setting = normalize_setting(link_cfg.pop("setting", "transductive"))
+    new_node_ratio = float(link_cfg.pop("new_node_ratio", 0.1))
+    new_node_seed = int(link_cfg.pop("new_node_seed", 2020))
+    inductive: InductiveSetting | None = None
+    if setting == "inductive":
+        if negative_strategy != "random":
+            raise ValueError(
+                "link.setting=inductive reports DyGLib's new-node metrics with random "
+                "negatives; combine it with link.negative_strategy=random"
+            )
+        inductive = build_inductive_setting(
+            graph.snapshots, split, ratio=new_node_ratio, seed=new_node_seed
+        )
+        print(json.dumps({"inductive_setting": inductive.summary}), flush=True)
+        # Models train on the reduced snapshots; validation/test windows keep
+        # their full context and full positives for checkpoint selection.
+        split = TemporalWindowSplit(
+            train=inductive.train_windows,
+            validation=split.validation,
+            test=split.test,
+        )
     link_cfg["negative_destination_candidates"] = _negative_destination_pool(graph)
     configured = link_cfg.get("bipartite_source_count")
     if configured is not None and (
@@ -751,6 +844,7 @@ def run(config: dict) -> dict[str, dict[str, dict[str, float]]]:
             seed,
             negative_edge_table,
             meter,
+            inductive,
         )
         store("jodie_author", jodie_model, meter, jodie_validation, jodie_test)
         del jodie_model
@@ -765,7 +859,8 @@ def run(config: dict) -> dict[str, dict[str, dict[str, float]]]:
             ).to(device)
             tgat_model.prepare_streams(graph.snapshots, train_snapshots)
         tgat_validation, tgat_test = _train_one(
-            "tgat", tgat_model, split, tgat_training, seed, negative_edge_table, meter
+            "tgat", tgat_model, split, tgat_training, seed, negative_edge_table, meter,
+            inductive,
         )
         store("tgat", tgat_model, meter, tgat_validation, tgat_test)
         del tgat_model
@@ -799,18 +894,36 @@ def run(config: dict) -> dict[str, dict[str, dict[str, float]]]:
             edge_bank.eval()
         if negative_edge_table is not None:
             edge_bank.negative_edge_table = negative_edge_table
-        with meter.measure("final_validation"):
-            edge_validation = edge_bank.evaluate_protocol(
-                split.validation,
-                split.train,
-                query_seed=int(shared_training.get("validation_query_seed", 0)),
-            )
-        with meter.measure("test"):
-            edge_test = edge_bank.evaluate_protocol(
-                split.test,
-                [*split.train, *split.validation],
-                query_seed=int(shared_training.get("test_query_seed", 2)),
-            )
+        if inductive is None:
+            with meter.measure("final_validation"):
+                edge_validation = edge_bank.evaluate_protocol(
+                    split.validation,
+                    split.train,
+                    query_seed=int(shared_training.get("validation_query_seed", 0)),
+                )
+            with meter.measure("test"):
+                edge_test = edge_bank.evaluate_protocol(
+                    split.test,
+                    [*split.train, *split.validation],
+                    query_seed=int(shared_training.get("test_query_seed", 2)),
+                )
+        else:
+            # EdgeBank's memory is DyGLib's full train(+val) data, new-node
+            # edges included; only the scored positives and the pool change.
+            with meter.measure("final_validation"):
+                _attach_inductive_evaluation(edge_bank, inductive, "validation")
+                edge_validation = edge_bank.evaluate_protocol(
+                    inductive.validation_windows,
+                    inductive.full_train_windows,
+                    query_seed=inductive.validation_query_seed,
+                )
+            with meter.measure("test"):
+                _attach_inductive_evaluation(edge_bank, inductive, "test")
+                edge_test = edge_bank.evaluate_protocol(
+                    inductive.test_windows,
+                    [*inductive.full_train_windows, *split.validation],
+                    query_seed=inductive.test_query_seed,
+                )
         edge_test["best_epoch"] = 0.0
         store("edgebank", edge_bank, meter, edge_validation, edge_test)
         del edge_bank
@@ -829,7 +942,11 @@ def run(config: dict) -> dict[str, dict[str, dict[str, float]]]:
                 **dict(config.get(baseline_name, {})),
                 **link_cfg,
             ).to(device)
-            baseline_model.prepare_streams(graph.snapshots, train_snapshots)
+            baseline_model.prepare_streams(
+                graph.snapshots,
+                train_snapshots,
+                exclude_nodes=None if inductive is None else inductive.sampled_nodes.numpy(),
+            )
         baseline_training = {
             **shared_training,
             **dict(config.get(f"{baseline_name}_training", {})),
@@ -842,6 +959,7 @@ def run(config: dict) -> dict[str, dict[str, dict[str, float]]]:
             seed,
             negative_edge_table,
             meter,
+            inductive,
         )
         store(baseline_name, baseline_model, meter, baseline_validation, baseline_test)
         del baseline_model
@@ -888,6 +1006,7 @@ def run(config: dict) -> dict[str, dict[str, dict[str, float]]]:
             seed,
             negative_edge_table,
             meter,
+            inductive,
         )
         store(baseline_name, baseline_model, meter, baseline_validation, baseline_test)
         del baseline_model
@@ -914,15 +1033,23 @@ def run(config: dict) -> dict[str, dict[str, dict[str, float]]]:
                 flush=True,
             )
         with meter.measure("setup"):
-            rcps_model.prepare_causal_history(graph.snapshots)
+            # Inductive setting: the causal event history is built from the
+            # reduced training snapshots followed by the full validation/test
+            # ones, so no held-out training event reaches a training query.
+            rcps_model.prepare_causal_history(
+                graph.snapshots if inductive is None else inductive.history_snapshots
+            )
         rcps_validation, rcps_test = _train_one(
-            "rcps_jepa", rcps_model, split, rcps_training, seed, negative_edge_table, meter
+            "rcps_jepa", rcps_model, split, rcps_training, seed, negative_edge_table, meter,
+            inductive,
         )
         store("rcps_jepa", rcps_model, meter, rcps_validation, rcps_test)
         del rcps_model
         release_device_memory(device)
 
-    _assert_full_event_coverage(result, split, link_cfg)
+    _assert_full_event_coverage(
+        result, split if inductive is None else inductive.final_split(split), link_cfg
+    )
 
     output_path = config.get("output_path")
     if output_path:
@@ -1061,6 +1188,7 @@ def _dataset_configs(config: dict) -> list[tuple[str, dict]]:
     # Historical/inductive runs write ``<stem>_<strategy>.json`` so they never
     # overwrite the random-negative results of the same dataset.
     negative_strategy = _negative_strategy(base)
+    link_setting = _link_setting(base)
     expanded: list[tuple[str, dict]] = []
     seen: set[str] = set()
     # The author JODIE consumes the original event width. TGAT and all DyGLib
@@ -1089,8 +1217,9 @@ def _dataset_configs(config: dict) -> list[tuple[str, dict]]:
         current["dataset_name"] = name
         current["data"] = {**dict(current.get("data", {})), "path": str(path)}
         stem = output_name or f"link_comparison_{name}"
-        current["output_path"] = _with_strategy_suffix(
-            output_dir / f"{stem}.json", negative_strategy
+        current["output_path"] = _with_setting_suffix(
+            _with_strategy_suffix(output_dir / f"{stem}.json", negative_strategy),
+            link_setting,
         )
         if dataset_models is not None:
             allowed = [str(model).lower() for model in dataset_models]
@@ -1236,6 +1365,7 @@ def main() -> None:
             settings["pretrain_epochs"] = args.epochs
             settings["probe_epochs"] = args.epochs
     negative_strategy = _negative_strategy(config)
+    link_setting = _link_setting(config)
     # Fail on a malformed ablation section before any training starts.
     _rcps_ablation(config)
     if negative_strategy != "random":
@@ -1244,6 +1374,10 @@ def main() -> None:
         for key in ("output_path", "summary_output_path"):
             if config.get(key):
                 config[key] = _with_strategy_suffix(config[key], negative_strategy)
+    if link_setting != "transductive":
+        for key in ("output_path", "summary_output_path"):
+            if config.get(key):
+                config[key] = _with_setting_suffix(config[key], link_setting)
     seeds = _seed_values(config)
     dataset_results = {}
     for dataset_name, dataset_config in _dataset_configs(config):
@@ -1287,6 +1421,8 @@ def main() -> None:
         }
         if negative_strategy != "random":
             dataset_summary["negative_strategy"] = negative_strategy
+        if link_setting != "transductive":
+            dataset_summary["setting"] = link_setting
         if config.get("ablation"):
             dataset_summary["ablation"] = _rcps_ablation(config)
         base_output.parent.mkdir(parents=True, exist_ok=True)

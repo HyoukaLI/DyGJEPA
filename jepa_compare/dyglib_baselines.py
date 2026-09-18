@@ -211,6 +211,11 @@ class DyGLibLinkBaseline(nn.Module, SharedLinkProtocol):
         self.link_predictor: MergeLayer | None = None
         self._train_stream: NumpyEventStream | None = None
         self._snapshot_streams: dict[int, NumpyEventStream] = {}
+        # Inductive (new-node) setting: per-time reduced training streams, and
+        # the (new node ids, destination pool) pair the driver attaches right
+        # before the final validation/test pass.  Both are 0-based ids.
+        self._train_snapshot_streams: dict[int, NumpyEventStream] = {}
+        self.inductive_evaluation: tuple[np.ndarray, np.ndarray] | None = None
         self._train_sampler: NeighborSampler | None = None
         self._full_sampler: NeighborSampler | None = None
         self._train_destinations: np.ndarray | None = None
@@ -225,9 +230,25 @@ class DyGLibLinkBaseline(nn.Module, SharedLinkProtocol):
         self,
         all_snapshots: Sequence[Snapshot],
         train_snapshots: Sequence[Snapshot],
+        exclude_nodes: np.ndarray | None = None,
     ) -> None:
+        """Index the full stream and the training stream.
+
+        ``exclude_nodes`` (0-based ids; DyGLib inductive setting) removes every
+        training event touching one of them.  The reduced training stream keeps
+        the DyGLib edge ids of the full stream, so memory models still address
+        the right edge features, while the full stream and full neighbour
+        sampler used at evaluation time are untouched (DyGLib's
+        ``full_neighbor_sampler``).
+        """
         streams: list[NumpyEventStream] = []
         next_edge_id = 1
+        excluded = (
+            np.zeros(self.num_nodes + 1, dtype=bool) if exclude_nodes is not None else None
+        )
+        if excluded is not None:
+            excluded[np.asarray(exclude_nodes, dtype=np.int64) + 1] = True
+        self._train_snapshot_streams = {}
         for snapshot in sorted(all_snapshots, key=lambda item: item.time):
             stream = _snapshot_stream(
                 snapshot,
@@ -241,11 +262,16 @@ class DyGLibLinkBaseline(nn.Module, SharedLinkProtocol):
             next_edge_id += len(stream)
         full_stream = _concatenate(streams, self.dimension)
         train_ids = {snapshot.time for snapshot in train_snapshots}
-        train_streams = [
-            self._snapshot_streams[snapshot.time]
-            for snapshot in sorted(all_snapshots, key=lambda item: item.time)
-            if snapshot.time in train_ids
-        ]
+        train_streams = []
+        for snapshot in sorted(all_snapshots, key=lambda item: item.time):
+            if snapshot.time not in train_ids:
+                continue
+            stream = self._snapshot_streams[snapshot.time]
+            if excluded is not None:
+                keep = ~(excluded[stream.sources] | excluded[stream.destinations])
+                stream = stream.take(keep)
+                self._train_snapshot_streams[snapshot.time] = stream
+            train_streams.append(stream)
         self._train_stream = _concatenate(train_streams, self.dimension)
         self._train_destinations = np.unique(self._train_stream.destinations)
         self._full_destinations = np.unique(full_stream.destinations)
@@ -517,8 +543,10 @@ class DyGLibLinkBaseline(nn.Module, SharedLinkProtocol):
         backbone, predictor = self._require_prepared()
         if self.is_memory_model:
             backbone.memory_bank.__init_memory_bank__()  # type: ignore[attr-defined]
+            # Training-period history is the reduced stream under the inductive
+            # setting (the memory never saw the held-out nodes during training).
             history = [
-                self._snapshot_streams[item.time]
+                self._train_snapshot_streams.get(item.time, self._snapshot_streams[item.time])
                 for item in unique_snapshots(history_windows)
             ]
             self._advance_memory(_concatenate(history, self.dimension))
@@ -526,6 +554,25 @@ class DyGLibLinkBaseline(nn.Module, SharedLinkProtocol):
         target_snapshots = unique_snapshots(windows, targets_only=True)
         targets = [self._snapshot_streams[item.time] for item in target_snapshots]
         stream = _concatenate(targets, self.dimension)
+        destination_pool = self._full_destinations
+        if self.inductive_evaluation is not None:
+            # DyGLib new_node_val/test_data: only events touching a node unseen
+            # in training, scored against those events' own destinations.
+            new_node_ids, pool = self.inductive_evaluation
+            is_new = np.zeros(self.num_nodes + 1, dtype=bool)
+            is_new[np.asarray(new_node_ids, dtype=np.int64) + 1] = True
+            stream = stream.take(is_new[stream.sources] | is_new[stream.destinations])
+            expected = sum(
+                int(item.query_edge_index.shape[1])
+                for item in target_snapshots
+                if item.query_edge_index is not None
+            )
+            if len(stream) != expected:
+                raise RuntimeError(
+                    f"{self.model_name}: {len(stream)} new-node events in the stream "
+                    f"but {expected} restricted target events were given"
+                )
+            destination_pool = np.asarray(pool, dtype=np.int64) + 1
         table_negatives = None
         if self.negative_edge_table is not None:
             table_negatives = self.negative_edge_table.for_snapshots(
@@ -547,13 +594,13 @@ class DyGLibLinkBaseline(nn.Module, SharedLinkProtocol):
             if table_negatives is None:
                 negative_sources = batch.sources
                 negatives = rng.choice(
-                    self._full_destinations, size=len(batch), replace=True
+                    destination_pool, size=len(batch), replace=True
                 ).astype(np.int64)
                 if not self.allow_negative_collisions:
                     collision = negatives == batch.destinations
-                    while collision.any() and self._full_destinations.size > 1:
+                    while collision.any() and destination_pool.size > 1:
                         negatives[collision] = rng.choice(
-                            self._full_destinations,
+                            destination_pool,
                             size=int(collision.sum()),
                             replace=True,
                         )

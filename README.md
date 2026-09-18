@@ -149,6 +149,41 @@ random protocol and later ones increasingly test whether a model picks up the
 recurrence of edges it never saw in training. Results go to
 `results/inductive/*_inductive.json`.
 
+### Inductive (new-node) setting with random negatives (separate run)
+
+The "inductive" tables of DyGFormer / DyG-Mamba style papers are a different
+thing from the inductive *negatives* above: they follow DyGLib's
+`get_link_prediction_data`, which holds nodes out of training and evaluates on
+the events that touch a node the model never saw. This is a fourth separate
+run:
+
+```bash
+bash scripts/run_link_datasets_inductive_setting.sh              # all datasets
+bash scripts/run_link_datasets_inductive_setting.sh canparl uci  # a subset
+sbatch run_link_datasets_inductive_setting.sbatch                # cluster; DATASET_NAMES/MODELS/SEEDS/EPOCHS as usual
+```
+
+`configs/link_comparison_all_inductive_setting.yaml` overlays the random
+config with `link.setting: inductive` (`new_node_ratio: 0.1`,
+`new_node_seed: 2020`). The driver (`jepa_compare/inductive_setting.py`) draws
+10% of all nodes among those that interact after the training period, removes
+every training event that touches one of them (their message edges, features
+and activity in the training snapshots as well), trains every model on the
+reduced snapshots and still selects its checkpoint on the ordinary
+(transductive) validation set with random negatives. The final
+validation/test pass then scores only the events with at least one endpoint
+absent from the reduced training data, against one random destination per
+event drawn from those events' own destinations (validation seed 1, test
+seed 3), 200 positives per batch. At evaluation time the context snapshots,
+DyGLib neighbour samplers and EdgeBank's memory see the full graph (DyGLib's
+`full_neighbor_sampler`), memory models replay the reduced training stream,
+and DyGJEPA's causal event history is built from the reduced training
+snapshots followed by the full evaluation ones. The run prints an
+`inductive_setting` summary (nodes held out, events removed, events scored)
+and writes `results/inductive_setting/*_inductive_setting.json`; the
+multi-seed files carry `"setting": "inductive"`. It cannot be combined with
+historical/inductive negatives.
+
 ### DyGJEPA module ablations (separate runs)
 
 Each ablation removes one module of the full model and is otherwise the main
